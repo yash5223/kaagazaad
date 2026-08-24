@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/User');
 const Alert = require('../models/Alert');
-
+const authMiddleware = require('../middleware/authMiddleware');
 async function createAlert({ title, message, type = 'info', priority = 'medium', sent_by = 'System', sent_to, related_asset_id = null }) {
   try {
     if (!sent_to) return null;
@@ -14,7 +13,6 @@ async function createAlert({ title, message, type = 'info', priority = 'medium',
     return null;
   }
 }
-
 async function checkExpiryAlerts(userMatch, assets) {
   try {
     const now = new Date();
@@ -60,27 +58,21 @@ async function checkExpiryAlerts(userMatch, assets) {
     console.error('checkExpiryAlerts error:', err.message);
   }
 }
-
-router.get('/fetch-alerts', async (req, res) => {
+router.get('/fetch-alerts', authMiddleware, async (req, res) => {
   try {
-    const { email } = req.query;
-    if (!email) {
-      return res.status(400).json({ error: 'Email parameter is required.' });
-    }
-    const userMatch = await User.findOne({ email: email.toLowerCase().trim() });
-    if (!userMatch) {
-      return res.status(404).json({ error: 'User account profile not found.' });
-    }
-    const alerts = await Alert.find({ sent_to: userMatch.customer_id }).sort({ created_at: -1 });
+    const alerts = await Alert.find({ sent_to: req.user.customer_id }).sort({ created_at: -1 });
     return res.status(200).json({ success: true, alerts });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
-
-router.patch('/mark-read/:id', async (req, res) => {
+router.patch('/mark-read/:id', authMiddleware, async (req, res) => {
   try {
-    const alert = await Alert.findByIdAndUpdate(req.params.id, { is_read: true }, { new: true });
+    const alert = await Alert.findOneAndUpdate(
+      { _id: req.params.id, sent_to: req.user.customer_id },
+      { is_read: true },
+      { new: true }
+    );
     if (!alert) {
       return res.status(404).json({ error: 'Alert not found.' });
     }
@@ -89,5 +81,4 @@ router.patch('/mark-read/:id', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-
 module.exports = { router, createAlert, checkExpiryAlerts };

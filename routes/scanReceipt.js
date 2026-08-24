@@ -3,9 +3,10 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const router = express.Router();
+const authMiddleware = require('../middleware/authMiddleware');
 const uploadDir = path.join(__dirname, '..', 'uploads');
-if (!fs.existsSync(uploadDir)) { 
-  fs.mkdirSync(uploadDir, { recursive: true }); 
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
 }
 const upload = multer({ dest: uploadDir });
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434/api/generate';
@@ -15,34 +16,22 @@ function extract(regex, text) {
   if (!match) return "";
   return (match[1] || match[0]).trim();
 }
-// OCR text (and the LLM fallback, despite being asked for YYYY-MM-DD) can
-// hand back dates as DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY, etc. — but every
-// date field in the app (and the Flutter date picker's parser) requires
-// strict YYYY-MM-DD. This normalizes whatever we found into that shape,
-// or returns '' if it can't confidently parse it.
 function normalizeDate(rawValue) {
   if (!rawValue) return '';
   const trimmed = String(rawValue).trim();
   if (!trimmed) return '';
-
-  // Already YYYY-MM-DD (or YYYY/MM/DD) — just normalize the separators.
   let match = trimmed.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (match) {
     const [, y, m, d] = match;
     return toIsoDate(y, m, d);
   }
-
-  // DD-MM-YYYY / DD/MM/YYYY / DD.MM.YYYY — the common format on Indian
-  // documents (and what OCR most often yields).
   match = trimmed.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
   if (match) {
     const [, d, m, y] = match;
     return toIsoDate(y, m, d);
   }
-
   return '';
 }
-
 function toIsoDate(year, month, day) {
   const y = parseInt(year, 10);
   const m = parseInt(month, 10);
@@ -52,9 +41,6 @@ function toIsoDate(year, month, day) {
   if (check.getFullYear() !== y || check.getMonth() !== m - 1 || check.getDate() !== d) return '';
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
-// Maps detected keywords to the app's real category tree:
-// top-level category -> subCategory -> documentType (leaf item), so
-// _applyCategoryFromOcr on the client can actually match it.
 function detectCategoryAndType(text) {
   if (/\b(car|motorcycle|suv|sedan|mileage|vin|registration number|chassis|puc\b)\b/i.test(text)) {
     const isPuc = /\bpuc\b/i.test(text);
@@ -79,30 +65,20 @@ function detectCategoryAndType(text) {
   if (/\b(phone|smartphone|laptop|macbook|smartwatch|tablet|ipad|\btv\b|television|refrigerator|fridge|\bac\b|washer|dryer|microwave)\b/i.test(text)) {
     return { category: 'Personal', subCategory: 'Gadgets & Appliances', documentType: 'Mobile Phone' };
   }
-  // Default: most scanned receipts are retail purchase invoices for a gadget/appliance.
   return { category: 'Personal', subCategory: 'Gadgets & Appliances', documentType: 'Purchase Invoice' };
 }
-
 function parseInvoice(text) {
   const { category, subCategory, documentType } = detectCategoryAndType(text);
   const nameMatch = extract(/(?:Description|Product|Item|Asset|Property Name)\s*[: ]\s*([A-Za-z0-9 ]+)/i, text);
-
-  // Kept separate on purpose: `store` (who it was bought/registered FROM,
-  // e.g. "Croma", "DLF Properties") vs `brand` (who MADE/manufactures it,
-  // e.g. "Samsung"). Conflating the two loses information, so both are
-  // extracted independently and both are always returned to the caller.
   const store = extract(/(?:Store|Seller|Broker|Vendor|Agency|Dealer)\s*[: ]\s*([A-Za-z0-9 ]+)/i, text)
     || extract(/\b(Reliance Digital|Croma|Vijay Sales)\b/i, text);
   const brand = extract(/(?:Brand|Builder|Developer|Manufacturer)\s*[: ]\s*([A-Za-z0-9 ]+)/i, text)
     || extract(/\b(LG|Samsung|Sony|Whirlpool|Godrej|IFB|Haier|Bosch|Panasonic|DLF|Godrej Properties|Tata)\b/i, text);
-
   return {
     category,
     subCategory,
     documentType,
     name: nameMatch || extract(/^([A-Za-z0-9 ]{3,24})/m, text),
-    // `store` is always surfaced on its own key so it is never silently
-    // dropped by callers that only look for a generic "issuingAuthority".
     store,
     storeOrSeller: store,
     brand,
@@ -118,7 +94,7 @@ function parseInvoice(text) {
     specField2: extract(/(?:RERA|Khata|VIN|Mileage|Serial Number|S\/N|Weight|Material)\s*[: ]\s*([A-Za-z0-9,.\- ]+)/i, text)
   };
 }
-router.post('/scan-receipt', upload.single('image'), async (req, res) => {
+router.post('/scan-receipt', authMiddleware, upload.single('image'), async (req, res) => {
   const sharp = require('sharp');
   const Tesseract = require('tesseract.js');
   let processedImagePath = null;
@@ -178,9 +154,6 @@ router.post('/scan-receipt', upload.single('image'), async (req, res) => {
         if (ollamaRes.ok) {
           const ollamaJson = await ollamaRes.json();
           const llmParsed = JSON.parse(ollamaJson.response);
-          // Never let the LLM fallback silently drop the store name: only
-          // overwrite storeOrSeller/issuingAuthority when the LLM actually
-          // found a store, otherwise keep whatever the regex pass extracted.
           if (llmParsed.store) {
             llmParsed.storeOrSeller = llmParsed.store;
             llmParsed.issuingAuthority = llmParsed.store;

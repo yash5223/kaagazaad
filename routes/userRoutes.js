@@ -1,11 +1,20 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Otp = require('../models/Otp');
 const { sendOtpEmail } = require('../utils/mailer');
+const authMiddleware = require('../middleware/authMiddleware');
 const router = express.Router();
 const EMAIL_REGEX = /^[\w.\-]+@[\w-]+\.[a-zA-Z]{2,}$/;
+function issueToken(user) {
+  return jwt.sign(
+    { id: user._id, customer_id: user.customer_id, email: user.email },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
+}
 router.post('/register/send-otp', async (req, res) => {
   try {
     const { email } = req.body;
@@ -100,13 +109,13 @@ router.post('/register', async (req, res) => {
       phone: phone.trim(),
       aadhaar: aadhaar.trim(),
       passwordHash: hashedPassword,
-      customer_id: generatedCustomerId, 
+      customer_id: generatedCustomerId,
       subscription_plan: "",
       emailVerified: true
     });
     await Otp.deleteOne({ _id: verified._id });
-    res.status(201).json({ 
-      success: true, 
+    res.status(201).json({
+      success: true,
       message: 'Account created successfully',
       data: {
         customer_id: newUser.customer_id,
@@ -120,6 +129,9 @@ router.post('/register', async (req, res) => {
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
     const user = await User.findOne({ email: email.toLowerCase().trim() });
     if (!user) {
       return res.status(404).json({ error: 'No account found with this email.' });
@@ -128,9 +140,17 @@ router.post('/login', async (req, res) => {
     if (!isMatch) {
       return res.status(400).json({ error: 'Incorrect password.' });
     }
+    const token = issueToken(user);
     res.status(200).json({
       success: true,
-      user: { id: user._id, fullName: user.fullName, email: user.email }
+      token,
+      user: {
+        id: user._id,
+        fullName: user.fullName,
+        email: user.email,
+        customer_id: user.customer_id,
+        pinEnabled: !!user.pinEnabled
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -152,7 +172,7 @@ router.post('/forgot-password/request', async (req, res) => {
     if (!cleanContact.includes('@')) {
       return res.status(400).json({ error: 'Password reset via phone number is not supported yet. Please use your registered email address instead.' });
     }
-    const otpCode = String(Math.floor(100000 + Math.random() * 900000)); 
+    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
     await Otp.deleteMany({ contactInfo: cleanContact });
     await Otp.create({ contactInfo: cleanContact, otpCode, expiresAt });
@@ -213,18 +233,18 @@ router.post('/forgot-password/reset', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/set-pin', async (req, res) => {
+router.post('/set-pin', authMiddleware, async (req, res) => {
   try {
-    const { email, password, pin } = req.body;
-    if (!email || !password || !pin) {
-      return res.status(400).json({ error: 'Email, password and pin are required.' });
+    const { password, pin } = req.body;
+    if (!password || !pin) {
+      return res.status(400).json({ error: 'Password and pin are required.' });
     }
     if (!/^\d{4,6}$/.test(pin)) {
       return res.status(400).json({ error: 'PIN must be 4 to 6 digits.' });
     }
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(404).json({ error: 'No account found with this email.' });
+      return res.status(404).json({ error: 'No account found for this session.' });
     }
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
@@ -239,15 +259,15 @@ router.post('/set-pin', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/verify-pin', async (req, res) => {
+router.post('/verify-pin', authMiddleware, async (req, res) => {
   try {
-    const { email, pin } = req.body;
-    if (!email || !pin) {
-      return res.status(400).json({ error: 'Email and pin are required.' });
+    const { pin } = req.body;
+    if (!pin) {
+      return res.status(400).json({ error: 'Pin is required.' });
     }
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(404).json({ error: 'No account found with this email.' });
+      return res.status(404).json({ error: 'No account found for this session.' });
     }
     if (!user.pinEnabled || !user.pinHash) {
       return res.status(200).json({ success: true, valid: true });
@@ -261,15 +281,15 @@ router.post('/verify-pin', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/remove-pin', async (req, res) => {
+router.post('/remove-pin', authMiddleware, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required.' });
+    const { password } = req.body;
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required.' });
     }
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(404).json({ error: 'No account found with this email.' });
+      return res.status(404).json({ error: 'No account found for this session.' });
     }
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
@@ -283,30 +303,22 @@ router.post('/remove-pin', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.get('/pin-status', async (req, res) => {
+router.get('/pin-status', authMiddleware, async (req, res) => {
   try {
-    const { email } = req.query;
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required.' });
-    }
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(404).json({ error: 'No account found with this email.' });
+      return res.status(404).json({ error: 'No account found for this session.' });
     }
     res.status(200).json({ success: true, pinEnabled: !!user.pinEnabled });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-router.get('/profile', async (req, res) => {
+router.get('/profile', authMiddleware, async (req, res) => {
   try {
-    const { email } = req.query;
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required.' });
-    }
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(404).json({ error: 'No account found with this email.' });
+      return res.status(404).json({ error: 'No account found for this session.' });
     }
     res.status(200).json({
       success: true,

@@ -1,29 +1,22 @@
 const express = require('express');
-const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const router = express.Router();
 const User = require('../models/User');
 const Asset = require('../models/Asset');
+const authMiddleware = require('../middleware/authMiddleware');
 const { buildDynamicFields } = require('../config/documentFieldTemplates');
 const { uploadBufferToCloudinary, deleteFromCloudinaryByUrl } = require('../utils/cloudinary');
 const { createAlert, checkExpiryAlerts } = require('./alertRoutes');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+router.use(authMiddleware);
 router.post('/save-asset', upload.array('images', 10), async (expressRequest, expressResponse) => {
   try {
-    const { email, password } = expressRequest.body;
     if (!expressRequest.body.assetData) {
       return expressResponse.status(400).json({ error: 'Asset parameters are missing.' });
     }
     const assetData = JSON.parse(expressRequest.body.assetData);
-    if (!email || !password) {
-      return expressResponse.status(401).json({ error: 'Authentication credentials required.' });
-    }
-    const userMatch = await User.findOne({ email: email.toLowerCase().trim() });
+    const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
-      return expressResponse.status(401).json({ error: 'Invalid user account credentials.' });
-    }
-    const isPasswordValid = await bcrypt.compare(password, userMatch.passwordHash);
-    if (!isPasswordValid) {
       return expressResponse.status(401).json({ error: 'Invalid user account credentials.' });
     }
     const assetDocuments = [];
@@ -38,26 +31,12 @@ router.post('/save-asset', upload.array('images', 10), async (expressRequest, ex
         assetDocuments.push(secureUrl);
       }
     }
-    // subSubCategory doubles as "document type" (they were always the same
-    // value, so we no longer store them as two separate fields). Fall back
-    // to a legacy `documentType` key in case any caller still sends that
-    // name instead of `subSubCategory`.
     const documentTypeValue = assetData.subSubCategory || assetData.documentType || '';
-
-    // Only the dynamic fields that are actually relevant to this document
-    // type get a real value; everything else on the schema is explicitly
-    // stored as '' (see config/documentFieldTemplates.js).
-    // E.g. Personal > Gadgets & Appliances > Mobile Phone currently maps to
-    // the default field set (documentNumber, issuingAuthority, expiryDate,
-    // valueAmount) — invoiceNumber would be stored as '' for that type.
     const dynamicFields = buildDynamicFields(documentTypeValue, assetData);
-
     const issueDateValue = assetData.issueDate;
     const storeOrSellerValue = assetData.storeOrSeller || '';
-
     const editAssetId = assetData._id || assetData.id;
     const isEdit = Boolean(editAssetId);
-
     const assetFields = {
       userId: userMatch.customer_id,
       name: assetData.name,
@@ -69,22 +48,11 @@ router.post('/save-asset', upload.array('images', 10), async (expressRequest, ex
       storeOrSeller: storeOrSellerValue,
       ...dynamicFields,
     };
-    // Only touch `documents` if new images were actually uploaded this time,
-    // otherwise we'd wipe out the asset's existing document list on a plain
-    // details edit.
     if (assetDocuments.length > 0) {
       assetFields.documents = assetDocuments;
     }
-
     let savedAsset;
     if (isEdit) {
-      // Update the existing asset in place. Using findByIdAndUpdate (rather
-      // than creating a fresh document) is what preserves the asset's
-      // original `_id` and its existing `serviceRecords` / `documents`
-      // subdocuments — previously every edit created a brand-new duplicate
-      // Asset with an empty serviceRecords array, orphaning the original
-      // one and breaking edit/delete of its service records (the app kept
-      // referencing an `_id` whose sibling duplicate no longer matched).
       savedAsset = await Asset.findOneAndUpdate(
         { _id: editAssetId, userId: userMatch.customer_id },
         { $set: assetFields },
@@ -101,7 +69,6 @@ router.post('/save-asset', upload.array('images', 10), async (expressRequest, ex
       savedAsset = new Asset({ ...assetFields, documents: assetDocuments });
       await savedAsset.save();
     }
-
     await createAlert({
       title: isEdit ? 'Document Updated' : 'Document Added',
       message: isEdit
@@ -119,12 +86,12 @@ router.post('/save-asset', upload.array('images', 10), async (expressRequest, ex
 });
 router.post('/append-document', upload.single('image'), async (req, res) => {
   try {
-    const { assetId, email } = req.body;
-    if (!req.file || !assetId || !email) {
+    const { assetId } = req.body;
+    if (!req.file || !assetId) {
       return res.status(400).json({ error: 'Missing parameters or file data.' });
     }
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
-    const asset = await Asset.findById(assetId);
+    const user = await User.findById(req.user.id);
+    const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!user || !asset) {
       return res.status(404).json({ error: 'Asset parameters not found.' });
     }
@@ -147,7 +114,7 @@ router.delete('/delete-document', async (req, res) => {
     if (!assetId || !filename) {
       return res.status(400).json({ error: 'Asset ID and filename are required parameters.' });
     }
-    const asset = await Asset.findById(assetId);
+    const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Asset record not found.' });
     }
@@ -161,11 +128,7 @@ router.delete('/delete-document', async (req, res) => {
 });
 router.get('/dashboard-summary', async (expressRequest, expressResponse) => {
   try {
-    const { email } = expressRequest.query;
-    if (!email) {
-      return expressResponse.status(400).json({ error: 'Email parameter is required.' });
-    }
-    const userMatch = await User.findOne({ email: email.toLowerCase().trim() });
+    const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
       return expressResponse.status(404).json({ error: 'User account profile not found.' });
     }
@@ -209,7 +172,7 @@ router.post('/append-service-record', async (req, res) => {
     if (!assetId || !title || !date || !cost) {
       return res.status(400).json({ error: 'Missing mandatory record parameters.' });
     }
-    const asset = await Asset.findById(assetId);
+    const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Target asset record not found.' });
     }
@@ -232,7 +195,7 @@ router.put('/edit-service-record', async (req, res) => {
     if (!assetId || !recordId || !title || !date || !cost) {
       return res.status(400).json({ error: 'Missing mandatory record parameters.' });
     }
-    const asset = await Asset.findById(assetId);
+    const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Target asset record not found.' });
     }
@@ -256,7 +219,7 @@ router.delete('/delete-service-record', async (req, res) => {
     if (!assetId || !recordId) {
       return res.status(400).json({ error: 'Asset ID and record ID are required parameters.' });
     }
-    const asset = await Asset.findById(assetId);
+    const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Target asset record not found.' });
     }
@@ -274,7 +237,7 @@ router.delete('/delete-service-record', async (req, res) => {
 router.delete('/delete-asset/:id', async (req, res) => {
   try {
     const assetId = req.params.id;
-    const asset = await Asset.findById(assetId);
+    const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Asset record not found.' });
     }
@@ -296,11 +259,8 @@ router.delete('/delete-asset/:id', async (req, res) => {
 });
 router.get('/fetch-assets', async (expressRequest, expressResponse) => {
   try {
-    const { email, search } = expressRequest.query;
-    if (!email) {
-      return expressResponse.status(400).json({ error: 'Email parameter is required.' });
-    }
-    const userMatch = await User.findOne({ email: email.toLowerCase().trim() });
+    const { search } = expressRequest.query;
+    const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
       return expressResponse.status(404).json({ error: 'User account profile not found.' });
     }
