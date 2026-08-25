@@ -25,6 +25,17 @@ const userSchema = new mongoose.Schema({
   role: { type: String, enum: ['user', 'admin'], default: 'user' },
   pinHash: { type: String, default: null },
   pinEnabled: { type: Boolean, default: false },
+  // --- Brute-force lockout state (see utils/accountLockout.js) ---
+  // Kept separate for login vs PIN since they're different attack surfaces
+  // (password login is also behind the IP-based authLimiter; the PIN is a
+  // much smaller keyspace and only reachable by someone who already holds
+  // a valid session token, so it gets its own counter/lock).
+  failedLoginAttempts: { type: Number, default: 0 },
+  loginLockedUntil: { type: Date, default: null },
+  loginLockoutCount: { type: Number, default: 0 },
+  failedPinAttempts: { type: Number, default: 0 },
+  pinLockedUntil: { type: Date, default: null },
+  pinLockoutCount: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
 });
 // Kept for backward compatibility with every part of the app (API

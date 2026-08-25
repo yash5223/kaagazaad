@@ -11,7 +11,32 @@ const aiRoutes = require('./routes/aiRoutes');
 const { router: alertRoutes } = require('./routes/alertRoutes');
 const Invite = require('./models/Invite');
 const { globalLimiter } = require('./middleware/rateLimiters');
+const { errorHandler } = require('./middleware/errorHandler');
 const app = express();
+
+// Optional error/uptime monitoring: if SENTRY_DSN is set, initialize
+// Sentry as early as possible so it can capture request context. When
+// unset (e.g. local dev), this is a complete no-op — nothing else in the
+// app depends on it being configured. See SECURITY.md for setup notes.
+let Sentry = null;
+if (process.env.SENTRY_DSN) {
+  Sentry = require('@sentry/node');
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'production',
+    tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE || 0),
+  });
+  console.log('[monitoring] Sentry error reporting enabled');
+} else {
+  console.warn('[monitoring] SENTRY_DSN not set — error reporting to Sentry is disabled. See SECURITY.md.');
+}
+
+// Render (and most PaaS hosts) put the app behind a reverse proxy, so the
+// real client IP arrives via X-Forwarded-For rather than the raw socket
+// address. `trust proxy` tells Express (and therefore express-rate-limit
+// and req.ip, used by utils/securityLog.js) to read that header instead of
+// logging/rate-limiting every request as if it came from the proxy itself.
+app.set('trust proxy', 1);
 
 // Sets a battery of security-related HTTP headers (X-Content-Type-Options,
 // X-Frame-Options, HSTS, etc). `contentSecurityPolicy` is off because this
@@ -71,6 +96,25 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/alerts', alertRoutes);
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+  console.error('[startup] MONGODB_URI is not set — refusing to start without a database connection string.');
+  process.exit(1);
+}
+if (!/^mongodb(\+srv)?:\/\//.test(MONGODB_URI)) {
+  console.error('[startup] MONGODB_URI does not look like a valid MongoDB connection string.');
+  process.exit(1);
+}
+// A `mongodb+srv://` URI (Atlas's standard format) implies TLS is on by
+// default; a plain `mongodb://` URI does not. Warn loudly rather than
+// silently connecting without encryption in transit if someone points this
+// at a non-Atlas / manually-configured cluster.
+if (MONGODB_URI.startsWith('mongodb://') && !/[?&]tls=true/.test(MONGODB_URI)) {
+  console.warn(
+    '[startup] MONGODB_URI uses the plain mongodb:// scheme without an explicit tls=true option. ' +
+    'Atlas connection strings (mongodb+srv://) are TLS by default; if this is not Atlas, confirm the ' +
+    'connection is encrypted in transit. See SECURITY.md.'
+  );
+}
 mongoose.set('bufferTimeoutMS', 8000);
 mongoose.connect(MONGODB_URI, {
   serverSelectionTimeoutMS: 8000, 
@@ -106,6 +150,20 @@ mongoose.connect(MONGODB_URI, {
   .catch((err) => console.error('Connection error:', err));
 app.get('/', (req, res) => {
   res.send('Server is running');
+});
+
+// Uptime-monitor target (UptimeRobot, Better Stack, Render health checks,
+// etc.) — reports whether the process is up AND whether it can actually
+// reach MongoDB, since a process that's alive but DB-disconnected still
+// can't serve real traffic.
+app.get('/healthz', (req, res) => {
+  const dbState = mongoose.connection.readyState; // 1 = connected
+  const ok = dbState === 1;
+  res.status(ok ? 200 : 503).json({
+    status: ok ? 'ok' : 'degraded',
+    db: ['disconnected', 'connected', 'connecting', 'disconnecting'][dbState] || 'unknown',
+    uptimeSeconds: Math.round(process.uptime()),
+  });
 });
 app.get('/join/:token', async (req, res) => {
   const { token } = req.params;
@@ -171,6 +229,17 @@ app.get('/join/:token', async (req, res) => {
 </body>
 </html>`);
 });
+// 404 for anything that didn't match a route above.
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found.' });
+});
+
+// Central error handler — must be registered last. Catches anything routes
+// pass to next(err) or that an asyncHandler-wrapped route throws, and is
+// the single place allowed to decide what error detail (if any) reaches
+// the client. See middleware/errorHandler.js.
+app.use(errorHandler);
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });

@@ -8,6 +8,9 @@ const { sendOtpEmail } = require('../utils/mailer');
 const authMiddleware = require('../middleware/authMiddleware');
 const { encryptAadhaar, decryptAadhaar, hashAadhaar } = require('../utils/aadhaarCrypto');
 const { authLimiter, otpRequestLimiter, otpVerifyLimiter } = require('../middleware/rateLimiters');
+const { validate, schemas } = require('../middleware/validators');
+const { checkLocked, recordFailure, recordSuccess } = require('../utils/accountLockout');
+const { logSecurityEvent } = require('../utils/securityLog');
 const router = express.Router();
 const EMAIL_REGEX = /^[\w.\-]+@[\w-]+\.[a-zA-Z]{2,}$/;
 
@@ -83,7 +86,8 @@ router.post('/register/send-otp', otpRequestLimiter, async (req, res) => {
     }
     res.status(200).json({ success: true, message: 'Verification code sent to your email' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -104,11 +108,12 @@ router.post('/register/verify-otp', otpVerifyLimiter, async (req, res) => {
     await Otp.create({ contactInfo: cleanEmail, otpCode: verificationToken, expiresAt: tokenExpiresAt, purpose: 'register_verified' });
     res.status(200).json({ success: true, verificationToken });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
-router.post('/register', async (req, res) => {
+router.post('/register', validate(schemas.registerPassword), async (req, res) => {
   try {
     const { firstName, lastName, fatherName, dob, gender, email, phone, aadhaar, passwordHash, verificationToken } = req.body;
     const cleanEmail = (email || '').toLowerCase().trim();
@@ -170,6 +175,7 @@ router.post('/register', async (req, res) => {
       emailVerified: true
     });
     await Otp.deleteOne({ _id: verified._id });
+    logSecurityEvent('register', { req, userId: newUser.customer_id, email: cleanEmail });
     res.status(201).json({
       success: true,
       message: 'Account created successfully',
@@ -179,7 +185,8 @@ router.post('/register', async (req, res) => {
       }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -189,14 +196,46 @@ router.post('/login', authLimiter, async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const cleanEmail = email.toLowerCase().trim();
+    const user = await User.findOne({ email: cleanEmail });
     if (!user) {
+      // Deliberately the same "not found" response whether or not the
+      // account exists — but still logged, since a wave of these against
+      // varied emails is itself a signal (enumeration/credential stuffing).
+      logSecurityEvent('login_failure', { req, email: cleanEmail, meta: { reason: 'no_account' } });
       return res.status(404).json({ error: 'No account found with this email.' });
+    }
+    const lockState = checkLocked(user, { lockedUntilField: 'loginLockedUntil' });
+    if (lockState.locked) {
+      logSecurityEvent('login_blocked', { req, userId: user.customer_id, email: cleanEmail, meta: { retryAfterSeconds: lockState.retryAfterSeconds } });
+      return res.status(429).json({
+        error: `Too many failed login attempts. Please try again in ${Math.ceil(lockState.retryAfterSeconds / 60)} minute(s).`,
+      });
     }
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
+      const failResult = recordFailure(user, {
+        attemptsField: 'failedLoginAttempts',
+        lockedUntilField: 'loginLockedUntil',
+        lockoutCountField: 'loginLockoutCount',
+      });
+      await user.save();
+      logSecurityEvent(failResult.justLocked ? 'login_lockout' : 'login_failure', {
+        req,
+        userId: user.customer_id,
+        email: cleanEmail,
+        meta: failResult.justLocked ? { retryAfterSeconds: failResult.retryAfterSeconds } : { remainingAttempts: failResult.remainingAttempts },
+      });
+      if (failResult.justLocked) {
+        return res.status(429).json({
+          error: `Too many failed login attempts. Please try again in ${Math.ceil(failResult.retryAfterSeconds / 60)} minute(s).`,
+        });
+      }
       return res.status(400).json({ error: 'Incorrect password.' });
     }
+    recordSuccess(user, { attemptsField: 'failedLoginAttempts', lockedUntilField: 'loginLockedUntil' });
+    await user.save();
+    logSecurityEvent('login_success', { req, userId: user.customer_id, email: cleanEmail });
     const token = issueToken(user);
     res.status(200).json({
       success: true,
@@ -210,7 +249,8 @@ router.post('/login', authLimiter, async (req, res) => {
       }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -243,7 +283,8 @@ router.post('/forgot-password/request', otpRequestLimiter, async (req, res) => {
     }
     res.status(200).json({ success: true, message: 'Verification code sent to your email' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -260,11 +301,12 @@ router.post('/forgot-password/verify', otpVerifyLimiter, async (req, res) => {
     }
     res.status(200).json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
-router.post('/forgot-password/reset', otpVerifyLimiter, async (req, res) => {
+router.post('/forgot-password/reset', otpVerifyLimiter, validate(schemas.resetPassword), async (req, res) => {
   try {
     const { contactInfo, otpCode, newPassword } = req.body;
     if (!contactInfo || !otpCode || !newPassword) {
@@ -278,23 +320,28 @@ router.post('/forgot-password/reset', otpVerifyLimiter, async (req, res) => {
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
     await User.updateMany(
       { $or: [{ email: cleanContact }, { phone: cleanContact }] },
-      { $set: { passwordHash: hashedNewPassword } }
+      {
+        $set: { passwordHash: hashedNewPassword },
+        // A password reset is also a good moment to clear any standing
+        // login lockout — the person just proved account ownership via
+        // OTP, a stronger signal than the lockout was ever guarding against.
+        $unset: { loginLockedUntil: '' },
+      }
     );
     await Otp.deleteMany({ contactInfo: cleanContact, purpose: 'password_reset' });
+    logSecurityEvent('password_reset', { req, email: cleanContact });
     res.status(200).json({ success: true, message: 'Password updated successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
-router.post('/set-pin', authMiddleware, async (req, res) => {
+router.post('/set-pin', authMiddleware, validate(schemas.pinBody), async (req, res) => {
   try {
     const { password, pin } = req.body;
     if (!password || !pin) {
       return res.status(400).json({ error: 'Password and pin are required.' });
-    }
-    if (!/^\d{4,6}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be 4 to 6 digits.' });
     }
     const user = await User.findById(req.user.id);
     if (!user) {
@@ -307,10 +354,16 @@ router.post('/set-pin', authMiddleware, async (req, res) => {
     const hashedPin = await bcrypt.hash(pin, 10);
     user.pinHash = hashedPin;
     user.pinEnabled = true;
+    // A freshly (re)set PIN gets a clean slate — any lockout from guesses
+    // against the old PIN no longer applies to this one.
+    user.failedPinAttempts = 0;
+    user.pinLockedUntil = null;
     await user.save();
+    logSecurityEvent('pin_set', { req, userId: user.customer_id, email: user.email });
     res.status(200).json({ success: true, message: '2FA PIN saved successfully.', pinEnabled: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -327,13 +380,44 @@ router.post('/verify-pin', authMiddleware, async (req, res) => {
     if (!user.pinEnabled || !user.pinHash) {
       return res.status(200).json({ success: true, valid: true });
     }
+    const lockState = checkLocked(user, { lockedUntilField: 'pinLockedUntil' });
+    if (lockState.locked) {
+      logSecurityEvent('pin_blocked', { req, userId: user.customer_id, email: user.email, meta: { retryAfterSeconds: lockState.retryAfterSeconds } });
+      return res.status(429).json({
+        success: false,
+        valid: false,
+        error: `Too many incorrect PIN attempts. Please try again in ${Math.ceil(lockState.retryAfterSeconds / 60)} minute(s).`,
+      });
+    }
     const isMatch = await bcrypt.compare(pin, user.pinHash);
     if (!isMatch) {
-      return res.status(200).json({ success: false, valid: false });
+      const failResult = recordFailure(user, {
+        attemptsField: 'failedPinAttempts',
+        lockedUntilField: 'pinLockedUntil',
+        lockoutCountField: 'pinLockoutCount',
+      });
+      await user.save();
+      logSecurityEvent(failResult.justLocked ? 'pin_lockout' : 'pin_failure', {
+        req,
+        userId: user.customer_id,
+        email: user.email,
+        meta: failResult.justLocked ? { retryAfterSeconds: failResult.retryAfterSeconds } : { remainingAttempts: failResult.remainingAttempts },
+      });
+      if (failResult.justLocked) {
+        return res.status(429).json({
+          success: false,
+          valid: false,
+          error: `Too many incorrect PIN attempts. Please try again in ${Math.ceil(failResult.retryAfterSeconds / 60)} minute(s).`,
+        });
+      }
+      return res.status(200).json({ success: false, valid: false, remainingAttempts: failResult.remainingAttempts });
     }
+    recordSuccess(user, { attemptsField: 'failedPinAttempts', lockedUntilField: 'pinLockedUntil' });
+    await user.save();
     res.status(200).json({ success: true, valid: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -353,10 +437,14 @@ router.post('/remove-pin', authMiddleware, async (req, res) => {
     }
     user.pinHash = null;
     user.pinEnabled = false;
+    user.failedPinAttempts = 0;
+    user.pinLockedUntil = null;
     await user.save();
+    logSecurityEvent('pin_removed', { req, userId: user.customer_id, email: user.email });
     res.status(200).json({ success: true, message: '2FA PIN removed successfully.', pinEnabled: false });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -368,7 +456,8 @@ router.get('/pin-status', authMiddleware, async (req, res) => {
     }
     res.status(200).json({ success: true, pinEnabled: !!user.pinEnabled });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 
@@ -403,7 +492,8 @@ router.get('/profile', authMiddleware, async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 module.exports = router;

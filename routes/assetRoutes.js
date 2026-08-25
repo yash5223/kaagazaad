@@ -1,20 +1,47 @@
 const express = require('express');
-const multer = require('multer');
 const router = express.Router();
 const User = require('../models/User');
 const Asset = require('../models/Asset');
 const authMiddleware = require('../middleware/authMiddleware');
 const { buildDynamicFields } = require('../config/documentFieldTemplates');
-const { uploadBufferToCloudinary, deleteFromCloudinaryByUrl } = require('../utils/cloudinary');
+const {
+  uploadBufferToCloudinary,
+  deleteFromCloudinaryByUrl,
+  resolveDocumentUrl,
+  documentEntryMatches,
+} = require('../utils/cloudinary');
 const { createAlert, checkExpiryAlerts } = require('./alertRoutes');
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const { documentUpload } = require('../middleware/upload');
+const { fileTypeGuard } = require('../middleware/fileTypeGuard');
+const { validate, validateAssetDataField, schemas } = require('../middleware/validators');
+const { asyncHandler } = require('../middleware/errorHandler');
+const { logSecurityEvent } = require('../utils/securityLog');
+
 router.use(authMiddleware);
-router.post('/save-asset', upload.array('images', 10), async (expressRequest, expressResponse) => {
-  try {
-    if (!expressRequest.body.assetData) {
-      return expressResponse.status(400).json({ error: 'Asset parameters are missing.' });
-    }
-    const assetData = JSON.parse(expressRequest.body.assetData);
+
+/**
+ * Resolves an asset's `documents[]` array (a mix of legacy public URL
+ * strings and new `{ publicId, resourceType, format }` objects) into a
+ * flat array of viewable URL strings for the API response. Freshly signs
+ * every "authenticated" entry on each call — nothing signed is ever
+ * persisted, so it can't silently expire while sitting in the database.
+ */
+function serializeAsset(assetDoc) {
+  const plain = assetDoc.toObject ? assetDoc.toObject() : { ...assetDoc };
+  plain.documents = (plain.documents || [])
+    .map((entry) => resolveDocumentUrl(entry))
+    .filter(Boolean);
+  return plain;
+}
+
+router.post(
+  '/save-asset',
+  documentUpload.array('images', 10),
+  fileTypeGuard(),
+  validate(schemas.saveAssetBody),
+  validateAssetDataField,
+  asyncHandler(async (expressRequest, expressResponse) => {
+    const assetData = expressRequest.assetData; // validated + parsed by validateAssetDataField
     const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
       return expressResponse.status(401).json({ error: 'Invalid user account credentials.' });
@@ -25,10 +52,11 @@ router.post('/save-asset', upload.array('images', 10), async (expressRequest, ex
       const sanitizedAssetName = assetData.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
       const timestamp = Date.now();
       for (let i = 0; i < uploadedFiles.length; i++) {
+        const file = uploadedFiles[i];
         const fileIndex = String(i + 1).padStart(2, '0');
         const publicId = `${userMatch.customer_id}_${sanitizedAssetName}_${fileIndex}_${timestamp}`;
-        const secureUrl = await uploadBufferToCloudinary(uploadedFiles[i].buffer, publicId);
-        assetDocuments.push(secureUrl);
+        const uploaded = await uploadBufferToCloudinary(file.buffer, publicId, file.verifiedResourceType);
+        assetDocuments.push(uploaded);
       }
     }
     const documentTypeValue = assetData.subSubCategory || assetData.documentType || '';
@@ -79,15 +107,18 @@ router.post('/save-asset', upload.array('images', 10), async (expressRequest, ex
       sent_by: userMatch.fullName || userMatch.email,
       sent_to: userMatch.customer_id,
     });
-    return expressResponse.status(201).json({ success: true, message: 'Asset successfully saved to vault.', asset: savedAsset });
-  } catch (serverError) {
-    return expressResponse.status(500).json({ error: serverError.message });
-  }
-});
-router.post('/append-document', upload.single('image'), async (req, res) => {
-  try {
+    return expressResponse.status(201).json({ success: true, message: 'Asset successfully saved to vault.', asset: serializeAsset(savedAsset) });
+  })
+);
+
+router.post(
+  '/append-document',
+  documentUpload.single('image'),
+  fileTypeGuard(),
+  validate(schemas.appendDocumentBody),
+  asyncHandler(async (req, res) => {
     const { assetId } = req.body;
-    if (!req.file || !assetId) {
+    if (!req.file) {
       return res.status(400).json({ error: 'Missing parameters or file data.' });
     }
     const user = await User.findById(req.user.id);
@@ -99,35 +130,37 @@ router.post('/append-document', upload.single('image'), async (req, res) => {
     const nextIndex = String(currentCount + 1).padStart(2, '0');
     const sanitizedName = asset.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
     const publicId = `${user.customer_id}_${sanitizedName}_${nextIndex}_${Date.now()}`;
-    const secureUrl = await uploadBufferToCloudinary(req.file.buffer, publicId);
+    const uploaded = await uploadBufferToCloudinary(req.file.buffer, publicId, req.file.verifiedResourceType);
     asset.documents = asset.documents || [];
-    asset.documents.push(secureUrl);
+    asset.documents.push(uploaded);
     await asset.save();
-    return res.status(200).json({ success: true, documents: asset.documents });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-router.delete('/delete-document', async (req, res) => {
-  try {
+    return res.status(200).json({ success: true, documents: serializeAsset(asset).documents });
+  })
+);
+
+router.delete(
+  '/delete-document',
+  validate(schemas.deleteDocumentBody),
+  asyncHandler(async (req, res) => {
     const { assetId, filename } = req.body;
-    if (!assetId || !filename) {
-      return res.status(400).json({ error: 'Asset ID and filename are required parameters.' });
-    }
     const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Asset record not found.' });
     }
-    asset.documents = asset.documents.filter(doc => doc !== filename);
+    const matched = (asset.documents || []).find((entry) => documentEntryMatches(entry, filename));
+    if (!matched) {
+      return res.status(404).json({ error: 'Document not found on this asset.' });
+    }
+    asset.documents = asset.documents.filter((entry) => entry !== matched);
     await asset.save();
-    await deleteFromCloudinaryByUrl(filename);
-    return res.status(200).json({ success: true, documents: asset.documents });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-router.get('/dashboard-summary', async (expressRequest, expressResponse) => {
-  try {
+    await deleteFromCloudinaryByUrl(matched);
+    return res.status(200).json({ success: true, documents: serializeAsset(asset).documents });
+  })
+);
+
+router.get(
+  '/dashboard-summary',
+  asyncHandler(async (expressRequest, expressResponse) => {
     const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
       return expressResponse.status(404).json({ error: 'User account profile not found.' });
@@ -162,39 +195,30 @@ router.get('/dashboard-summary', async (expressRequest, expressResponse) => {
         expiredAssets: expiredCount
       }
     });
-  } catch (serverError) {
-    return expressResponse.status(500).json({ error: serverError.message });
-  }
-});
-router.post('/append-service-record', async (req, res) => {
-  try {
+  })
+);
+
+router.post(
+  '/append-service-record',
+  validate(schemas.serviceRecordBody),
+  asyncHandler(async (req, res) => {
     const { assetId, title, date, cost, notes } = req.body;
-    if (!assetId || !title || !date || !cost) {
-      return res.status(400).json({ error: 'Missing mandatory record parameters.' });
-    }
     const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Target asset record not found.' });
     }
     asset.serviceRecords = asset.serviceRecords || [];
-    asset.serviceRecords.push({
-      title,
-      date: new Date(date),
-      cost: parseFloat(cost) || 0,
-      notes: notes || '-'
-    });
+    asset.serviceRecords.push({ title, date: new Date(date), cost, notes });
     await asset.save();
     return res.status(200).json({ success: true, serviceRecords: asset.serviceRecords });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-router.put('/edit-service-record', async (req, res) => {
-  try {
+  })
+);
+
+router.put(
+  '/edit-service-record',
+  validate(schemas.editServiceRecordBody),
+  asyncHandler(async (req, res) => {
     const { assetId, recordId, title, date, cost, notes } = req.body;
-    if (!assetId || !recordId || !title || !date || !cost) {
-      return res.status(400).json({ error: 'Missing mandatory record parameters.' });
-    }
     const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Target asset record not found.' });
@@ -205,20 +229,18 @@ router.put('/edit-service-record', async (req, res) => {
     }
     record.title = title;
     record.date = new Date(date);
-    record.cost = parseFloat(cost) || 0;
-    record.notes = notes || '-';
+    record.cost = cost;
+    record.notes = notes;
     await asset.save();
     return res.status(200).json({ success: true, serviceRecords: asset.serviceRecords });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-router.delete('/delete-service-record', async (req, res) => {
-  try {
+  })
+);
+
+router.delete(
+  '/delete-service-record',
+  validate(schemas.deleteServiceRecordBody),
+  asyncHandler(async (req, res) => {
     const { assetId, recordId } = req.body;
-    if (!assetId || !recordId) {
-      return res.status(400).json({ error: 'Asset ID and record ID are required parameters.' });
-    }
     const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Target asset record not found.' });
@@ -230,20 +252,22 @@ router.delete('/delete-service-record', async (req, res) => {
     record.deleteOne();
     await asset.save();
     return res.status(200).json({ success: true, serviceRecords: asset.serviceRecords });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-router.delete('/delete-asset/:id', async (req, res) => {
-  try {
+  })
+);
+
+router.delete(
+  '/delete-asset/:id',
+  validate(schemas.assetIdParam, 'params'),
+  asyncHandler(async (req, res) => {
     const assetId = req.params.id;
     const asset = await Asset.findOne({ _id: assetId, userId: req.user.customer_id });
     if (!asset) {
       return res.status(404).json({ error: 'Asset record not found.' });
     }
     const filesToDelete = asset.documents || [];
-    await Promise.all(filesToDelete.map(filename => deleteFromCloudinaryByUrl(filename)));
+    await Promise.all(filesToDelete.map(entry => deleteFromCloudinaryByUrl(entry)));
     await Asset.findByIdAndDelete(assetId);
+    logSecurityEvent('document_deleted', { req, userId: req.user.customer_id, email: req.user.email, meta: { assetId, assetName: asset.name } });
     await createAlert({
       title: 'Document Deleted',
       message: `"${asset.name}" was removed from your vault.`,
@@ -253,12 +277,12 @@ router.delete('/delete-asset/:id', async (req, res) => {
       sent_to: asset.userId,
     });
     return res.status(200).json({ success: true, message: 'Asset and all associated files deleted successfully.' });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-router.get('/fetch-assets', async (expressRequest, expressResponse) => {
-  try {
+  })
+);
+
+router.get(
+  '/fetch-assets',
+  asyncHandler(async (expressRequest, expressResponse) => {
     const { search } = expressRequest.query;
     const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
@@ -266,7 +290,7 @@ router.get('/fetch-assets', async (expressRequest, expressResponse) => {
     }
     let queryConditions = { userId: userMatch.customer_id };
     if (search && search.trim() !== '') {
-      const searchRegex = new RegExp(search.trim(), 'i');
+      const searchRegex = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       queryConditions.$or = [
         { name: searchRegex },
         { subSubCategory: searchRegex },
@@ -277,10 +301,9 @@ router.get('/fetch-assets', async (expressRequest, expressResponse) => {
     await checkExpiryAlerts(userMatch, userAssets);
     return expressResponse.status(200).json({
       success: true,
-      assets: userAssets
+      assets: userAssets.map(serializeAsset)
     });
-  } catch (serverError) {
-    return expressResponse.status(500).json({ error: serverError.message });
-  }
-});
+  })
+);
+
 module.exports = router;

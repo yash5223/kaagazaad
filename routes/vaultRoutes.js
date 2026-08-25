@@ -46,7 +46,8 @@ router.post('/create-invite', async (req, res) => {
     });
     return res.status(201).json({ success: true, invite: serializeInvite(invite, req) });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.get('/invites', async (req, res) => {
@@ -61,7 +62,8 @@ router.get('/invites', async (req, res) => {
     }).sort({ createdAt: -1 });
     return res.status(200).json({ success: true, invites: invites.map(inv => serializeInvite(inv, req)) });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.delete('/invites/:token', async (req, res) => {
@@ -74,7 +76,8 @@ router.delete('/invites/:token', async (req, res) => {
     await Invite.deleteOne({ _id: invite._id });
     return res.status(200).json({ success: true, message: 'Invite revoked.' });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.post('/join', async (req, res) => {
@@ -126,7 +129,8 @@ router.post('/join', async (req, res) => {
       vault: { ownerCustomerId: invite.ownerCustomerId, ownerName: owner ? owner.fullName : '', role: invite.role }
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.get('/members', async (req, res) => {
@@ -143,7 +147,8 @@ router.get('/members', async (req, res) => {
       }))
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.delete('/members/:id', async (req, res) => {
@@ -156,7 +161,8 @@ router.delete('/members/:id', async (req, res) => {
     await VaultMember.deleteOne({ _id: member._id });
     return res.status(200).json({ success: true, message: 'Member removed.' });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 function serializeShare(share) {
@@ -277,7 +283,8 @@ router.post('/share-document', async (req, res) => {
       }
       return res.status(409).json({ error: 'This document is already actively shared with that person.' });
     }
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.get('/shared-asset/:assetId', async (req, res) => {
@@ -301,7 +308,8 @@ router.get('/shared-asset/:assetId', async (req, res) => {
     }
     return res.status(200).json({ success: true, asset, viewOnly: !isOwner });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.get('/shared-with-me', async (req, res) => {
@@ -311,7 +319,8 @@ router.get('/shared-with-me', async (req, res) => {
     }).sort({ sharedAt: -1 });
     return res.status(200).json({ success: true, documents: shares.map(serializeShare) });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.get('/shared-by-me', async (req, res) => {
@@ -319,7 +328,8 @@ router.get('/shared-by-me', async (req, res) => {
     const shares = await SharedDocument.find({ ownerCustomerId: req.user.customer_id }).sort({ sharedAt: -1 });
     return res.status(200).json({ success: true, documents: shares.map(serializeShare) });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.delete('/shared/:id', async (req, res) => {
@@ -358,7 +368,8 @@ router.delete('/shared/:id', async (req, res) => {
     });
     return res.status(200).json({ success: true, message: 'Stopped sharing this document.', share: serializeShare(share) });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 async function resolveVaultAccess(requesterCustomerId, vaultOwnerCustomerId) {

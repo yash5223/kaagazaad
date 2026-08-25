@@ -63,7 +63,8 @@ router.get('/fetch-alerts', authMiddleware, async (req, res) => {
     const alerts = await Alert.find({ sent_to: req.user.customer_id }).sort({ created_at: -1 });
     return res.status(200).json({ success: true, alerts });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 router.patch('/mark-read/:id', authMiddleware, async (req, res) => {
@@ -78,7 +79,8 @@ router.patch('/mark-read/:id', authMiddleware, async (req, res) => {
     }
     return res.status(200).json({ success: true, alert });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 module.exports = { router, createAlert, checkExpiryAlerts };

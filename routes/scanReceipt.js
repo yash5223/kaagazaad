@@ -2,13 +2,54 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const FileType = require('file-type');
 const router = express.Router();
 const authMiddleware = require('../middleware/authMiddleware');
+const { asyncHandler } = require('../middleware/errorHandler');
 const uploadDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
-const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
+
+// Receipt scanning only ever makes sense for photographed/scanned images —
+// restrict both the extension (cheap, early check) and, after upload, the
+// actual sniffed file signature (authoritative check) to JPG/PNG.
+const RECEIPT_ALLOWED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png']);
+const RECEIPT_ALLOWED_MIMES = new Set(['image/jpeg', 'image/png']);
+
+const upload = multer({
+  dest: uploadDir,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter(req, file, cb) {
+    const ext = path.extname(file.originalname || '').replace('.', '').toLowerCase();
+    if (!RECEIPT_ALLOWED_EXTENSIONS.has(ext)) {
+      return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'Only JPG and PNG images are accepted for receipt scanning.'));
+    }
+    return cb(null, true);
+  },
+});
+
+/**
+ * Authoritative check on the buffered-to-disk upload: sniffs the real file
+ * signature rather than trusting the client-supplied mimetype or the
+ * filename's extension. Deletes the temp file and responds 400 on
+ * mismatch; otherwise calls next().
+ */
+async function verifyReceiptImage(req, res, next) {
+  if (!req.file) return next();
+  try {
+    const detected = await FileType.fromFile(req.file.path);
+    if (!detected || !RECEIPT_ALLOWED_MIMES.has(detected.mime)) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: 'The uploaded file is not a valid JPG or PNG image.' });
+    }
+    return next();
+  } catch (err) {
+    fs.unlink(req.file.path, () => {});
+    console.error('[scan-receipt] file verification error:', err);
+    return res.status(400).json({ error: 'Could not verify the uploaded file.' });
+  }
+}
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434/api/generate';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1:8b';
 function extract(regex, text) {
@@ -94,7 +135,7 @@ function parseInvoice(text) {
     specField2: extract(/(?:RERA|Khata|VIN|Mileage|Serial Number|S\/N|Weight|Material)\s*[: ]\s*([A-Za-z0-9,.\- ]+)/i, text)
   };
 }
-router.post('/scan-receipt', authMiddleware, upload.single('image'), async (req, res) => {
+router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyReceiptImage, async (req, res) => {
   const sharp = require('sharp');
   const Tesseract = require('tesseract.js');
   let processedImagePath = null;
@@ -171,7 +212,8 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), async (req,
   } catch (err) {
     if (req.file && fs.existsSync(req.file.path)) fs.unlink(req.file.path, () => {});
     if (processedImagePath && fs.existsSync(processedImagePath)) fs.unlink(processedImagePath, () => {});
-    return res.status(500).json({ error: err.message });
+    console.error('[server error]', err);
+    return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
 module.exports = router;

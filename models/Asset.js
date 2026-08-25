@@ -40,7 +40,14 @@ const assetSchema = new mongoose.Schema(
     valueAmount: { type: String, default: '' },
     invoiceNumber: { type: String, default: '' },
 
-    documents: { type: [String], default: [] },
+    // Mixed, not String: documents saved before this security hardening
+    // pass are plain public Cloudinary URL strings. Documents saved after
+    // it are private "authenticated" Cloudinary assets, stored as
+    // { publicId, resourceType, format } so a fresh signed, time-limited
+    // URL can be minted on every read (see utils/cloudinary.js) instead of
+    // a permanent public link being stored or handed out. Mixed keeps both
+    // shapes valid so existing production data doesn't need a migration.
+    documents: { type: [mongoose.Schema.Types.Mixed], default: [] },
     serviceRecords: { type: [serviceRecordSchema], default: [] },
   },
   { timestamps: true }
