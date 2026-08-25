@@ -1,4 +1,4 @@
-const FileType = require('file-type');
+const { fileTypeFromBuffer } = require('file-type');
 const path = require('path');
 const ALLOWED_TYPES = {
   'application/pdf': { extensions: ['pdf'], resourceType: 'raw' },
@@ -14,7 +14,7 @@ function extOf(filename) {
 }
 async function detectFile(buffer) {
   try {
-    return await FileType.fromBuffer(buffer);
+    return await fileTypeFromBuffer(buffer);
   } catch {
     return null; // buffer too short / corrupted to sniff
   }
