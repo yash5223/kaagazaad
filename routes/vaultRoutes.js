@@ -7,6 +7,7 @@ const VaultMember = require('../models/VaultMember');
 const Asset = require('../models/Asset');
 const SharedDocument = require('../models/SharedDocument');
 const authMiddleware = require('../middleware/authMiddleware');
+const { validate, schemas } = require('../middleware/validators');
 const { createAlert } = require('./alertRoutes');
 const INVITE_EXPIRY_DAYS = 7;
 router.use(authMiddleware);
@@ -30,12 +31,9 @@ function serializeInvite(invite, req) {
     expiresAt: invite.expiresAt
   };
 }
-router.post('/create-invite', async (req, res) => {
+router.post('/create-invite', validate(schemas.createInviteBody), async (req, res) => {
   try {
     const { role } = req.body;
-    if (!['view', 'edit', 'admin'].includes(role)) {
-      return res.status(400).json({ error: 'Role must be view, edit, or admin.' });
-    }
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + INVITE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
     const invite = await Invite.create({
@@ -66,7 +64,7 @@ router.get('/invites', async (req, res) => {
     return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-router.delete('/invites/:token', async (req, res) => {
+router.delete('/invites/:token', validate(schemas.inviteTokenParam, 'params'), async (req, res) => {
   try {
     const { token } = req.params;
     const invite = await Invite.findOne({ token, ownerCustomerId: req.user.customer_id });
@@ -80,12 +78,9 @@ router.delete('/invites/:token', async (req, res) => {
     return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-router.post('/join', async (req, res) => {
+router.post('/join', validate(schemas.joinBody), async (req, res) => {
   try {
     const { token } = req.body;
-    if (!token) {
-      return res.status(400).json({ error: 'Token is required.' });
-    }
     const joiner = await User.findById(req.user.id);
     if (!joiner) {
       return res.status(401).json({ error: 'Invalid user account credentials.' });
@@ -151,7 +146,7 @@ router.get('/members', async (req, res) => {
     return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-router.delete('/members/:id', async (req, res) => {
+router.delete('/members/:id', validate(schemas.memberIdParam, 'params'), async (req, res) => {
   try {
     const { id } = req.params;
     const member = await VaultMember.findOne({ _id: id, ownerCustomerId: req.user.customer_id });
@@ -183,12 +178,9 @@ function serializeShare(share) {
     revokedAt: share.revokedAt || null,
   };
 }
-router.post('/share-document', async (req, res) => {
+router.post('/share-document', validate(schemas.shareDocumentBody), async (req, res) => {
   try {
     const { assetId, documentPath, documentName, receiver } = req.body;
-    if (!assetId || !receiver) {
-      return res.status(400).json({ error: 'Asset and receiver are required.' });
-    }
     const owner = await User.findById(req.user.id);
     if (!owner) {
       return res.status(401).json({ error: 'Invalid user account credentials.' });
@@ -287,7 +279,7 @@ router.post('/share-document', async (req, res) => {
     return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-router.get('/shared-asset/:assetId', async (req, res) => {
+router.get('/shared-asset/:assetId', validate(schemas.sharedAssetIdParam, 'params'), async (req, res) => {
   try {
     const { assetId } = req.params;
     const requesterCustomerId = req.user.customer_id;
@@ -332,7 +324,7 @@ router.get('/shared-by-me', async (req, res) => {
     return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-router.delete('/shared/:id', async (req, res) => {
+router.delete('/shared/:id', validate(schemas.sharedIdParam, 'params'), async (req, res) => {
   try {
     const { id } = req.params;
     const owner = await User.findById(req.user.id);

@@ -63,6 +63,30 @@ const strongPassword = z
 // set-pin/verify-pin). 4-6 digits, matching the existing UI.
 const pinCode = z.string().regex(/^\d{4,6}$/, 'PIN must be 4 to 6 digits.');
 
+// Vault invite token: `crypto.randomBytes(16).toString('hex')` in
+// routes/vaultRoutes.js — always exactly 32 lowercase hex chars. Rejecting
+// anything else here is what stops a client from sending a Mongo query
+// operator object (e.g. `{ "$ne": null }`) instead of a real token string
+// and having it evaluated as part of the `Invite.findOne({ token })`
+// query — that would match ANY pending invite instead of the specific one
+// the caller was actually given.
+const inviteToken = z
+  .string()
+  .trim()
+  .regex(/^[0-9a-f]{32}$/, 'Invalid invite token.');
+
+// Free-text "email or phone" a document is being shared to
+// (routes/vaultRoutes.js share-document). Bounded length, no control
+// characters — actual email/phone shape is checked downstream by looking
+// the value up against real User records, so this only needs to guarantee
+// it's a plain string a Mongo query can safely embed.
+const contactLookup = z
+  .string()
+  .trim()
+  .min(1)
+  .max(254)
+  .refine((v) => !/[\x00-\x1f]/.test(v), 'Invalid value.');
+
 // ---------------------------------------------------------------------
 // Route-specific schemas
 // ---------------------------------------------------------------------
@@ -134,6 +158,35 @@ const schemas = {
   pinBody: z.object({
     pin: pinCode,
   }).passthrough(),
+  // --- routes/vaultRoutes.js ---
+  // Every body/param field this router reads is validated here — the
+  // router previously read req.body/req.params directly with no shape
+  // checks at all, which is what let a Mongo query operator be smuggled
+  // in as e.g. `token` on /join (see inviteToken above).
+  createInviteBody: z.object({
+    role: z.enum(['view', 'edit', 'admin'], { errorMap: () => ({ message: 'Role must be view, edit, or admin.' }) }),
+  }),
+  inviteTokenParam: z.object({
+    token: inviteToken,
+  }),
+  joinBody: z.object({
+    token: inviteToken,
+  }),
+  memberIdParam: z.object({
+    id: objectId,
+  }),
+  shareDocumentBody: z.object({
+    assetId: objectId,
+    documentPath: optionalString(2048),
+    documentName: optionalString(200),
+    receiver: contactLookup,
+  }),
+  sharedAssetIdParam: z.object({
+    assetId: objectId,
+  }),
+  sharedIdParam: z.object({
+    id: objectId,
+  }),
 };
 
 // ---------------------------------------------------------------------
@@ -202,4 +255,6 @@ module.exports = {
   moneyAmount,
   strongPassword,
   pinCode,
+  inviteToken,
+  contactLookup,
 };
