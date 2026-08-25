@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-
 const alertSchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
@@ -23,5 +22,4 @@ const alertSchema = new mongoose.Schema(
   },
   { versionKey: false }
 );
-
 module.exports = mongoose.model('Alert', alertSchema);

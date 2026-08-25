@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-
 const serviceRecordSchema = new mongoose.Schema(
   {
     title: { type: String, default: '' },
@@ -8,27 +7,17 @@ const serviceRecordSchema = new mongoose.Schema(
     notes: { type: String, default: '-' },
   }
   // Each service record now gets its own auto-generated `_id` (Mongoose's
-  // default behavior) so a single record can be targeted for edit/delete
-  // via /edit-service-record and /delete-service-record.
 );
-
 const assetSchema = new mongoose.Schema(
   {
     userId: { type: String, required: true, index: true },
-
-    // Always present, regardless of document type
     name: { type: String, required: true },
     category: { type: String, required: true },
     subCategory: { type: String, required: true },
-    // subSubCategory doubles as "document type" — the UI labels this field
-    // "Document Type", but since the two were always the same value, we
-    // store it once here instead of duplicating it into a separate
-    // `documentType` field.
     subSubCategory: { type: String, required: true },
     issueDate: { type: Date },
     notesOrAddress: { type: String, default: '' },
     storeOrSeller: { type: String, default: '' },
-
     // Dynamic fields — only the ones relevant to `subSubCategory` (the
     // document type) get a real value when an asset is saved (see
     // config/documentFieldTemplates.js).
@@ -39,7 +28,6 @@ const assetSchema = new mongoose.Schema(
     expiryDate: { type: String, default: '' },
     valueAmount: { type: String, default: '' },
     invoiceNumber: { type: String, default: '' },
-
     // Mixed, not String: documents saved before this security hardening
     // pass are plain public Cloudinary URL strings. Documents saved after
     // it are private "authenticated" Cloudinary assets, stored as
@@ -52,5 +40,4 @@ const assetSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
 module.exports = mongoose.model('Asset', assetSchema);

@@ -292,7 +292,6 @@ function generateWarrantyClaimEmail(asset, user) {
   const expiryDate = formatDateFlexible(asset.expiryDate);
   const value = asset.valueAmount && asset.valueAmount !== '-' ? asset.valueAmount : null;
   const parsedValue = value != null ? parseAmount(String(value)) : null;
-
   let warrantyStatusLine;
   if (expiryDate) {
     const parsedExpiry = new Date(asset.expiryDate);
@@ -308,12 +307,9 @@ function generateWarrantyClaimEmail(asset, user) {
   } else {
     warrantyStatusLine = 'This item is registered in my records as being under warranty.';
   }
-
   const subjectRef = refNumber ? ` (Ref: ${refNumber})` : '';
   const subject = `Warranty Claim Request – ${name}${subjectRef}`;
-
   const greetingTarget = seller || issuer || 'Customer Support / Warranty Team';
-
   const detailLines = [];
   detailLines.push(`- Product/Item Name: ${name}`);
   if (asset.category) detailLines.push(`- Category: ${asset.category}${asset.subCategory ? ` / ${asset.subCategory}` : ''}`);
@@ -322,11 +318,9 @@ function generateWarrantyClaimEmail(asset, user) {
   if (expiryDate) detailLines.push(`- Warranty Valid Until: ${expiryDate}`);
   if (issuer) detailLines.push(`- Issuing Authority/Brand: ${issuer}`);
   if (parsedValue) detailLines.push(`- Purchase Value: ${formatINR(parsedValue)}`);
-
   const userName = (user && user.fullName) || 'Customer';
   const userEmail = (user && user.email) || '';
   const userPhone = (user && user.phone) || '';
-
   const bodyParts = [];
   bodyParts.push(`To,\n${greetingTarget}`);
   bodyParts.push('Subject: ' + subject);
@@ -344,7 +338,6 @@ function generateWarrantyClaimEmail(asset, user) {
   bodyParts.push(
     `Regards,\n${userName}${userEmail ? `\n${userEmail}` : ''}${userPhone ? `\n${userPhone}` : ''}`
   );
-
   const body = bodyParts.join('\n\n');
   return { subject, body };
 }

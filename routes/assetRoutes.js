@@ -16,16 +16,7 @@ const { fileTypeGuard } = require('../middleware/fileTypeGuard');
 const { validate, validateAssetDataField, schemas } = require('../middleware/validators');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { logSecurityEvent } = require('../utils/securityLog');
-
 router.use(authMiddleware);
-
-/**
- * Resolves an asset's `documents[]` array (a mix of legacy public URL
- * strings and new `{ publicId, resourceType, format }` objects) into a
- * flat array of viewable URL strings for the API response. Freshly signs
- * every "authenticated" entry on each call — nothing signed is ever
- * persisted, so it can't silently expire while sitting in the database.
- */
 function serializeAsset(assetDoc) {
   const plain = assetDoc.toObject ? assetDoc.toObject() : { ...assetDoc };
   plain.documents = (plain.documents || [])
@@ -33,7 +24,6 @@ function serializeAsset(assetDoc) {
     .filter(Boolean);
   return plain;
 }
-
 router.post(
   '/save-asset',
   documentUpload.array('images', 10),
@@ -41,7 +31,7 @@ router.post(
   validate(schemas.saveAssetBody),
   validateAssetDataField,
   asyncHandler(async (expressRequest, expressResponse) => {
-    const assetData = expressRequest.assetData; // validated + parsed by validateAssetDataField
+    const assetData = expressRequest.assetData; 
     const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
       return expressResponse.status(401).json({ error: 'Invalid user account credentials.' });
@@ -110,7 +100,6 @@ router.post(
     return expressResponse.status(201).json({ success: true, message: 'Asset successfully saved to vault.', asset: serializeAsset(savedAsset) });
   })
 );
-
 router.post(
   '/append-document',
   documentUpload.single('image'),
@@ -137,7 +126,6 @@ router.post(
     return res.status(200).json({ success: true, documents: serializeAsset(asset).documents });
   })
 );
-
 router.delete(
   '/delete-document',
   validate(schemas.deleteDocumentBody),
@@ -157,7 +145,6 @@ router.delete(
     return res.status(200).json({ success: true, documents: serializeAsset(asset).documents });
   })
 );
-
 router.get(
   '/dashboard-summary',
   asyncHandler(async (expressRequest, expressResponse) => {
@@ -197,7 +184,6 @@ router.get(
     });
   })
 );
-
 router.post(
   '/append-service-record',
   validate(schemas.serviceRecordBody),
@@ -213,7 +199,6 @@ router.post(
     return res.status(200).json({ success: true, serviceRecords: asset.serviceRecords });
   })
 );
-
 router.put(
   '/edit-service-record',
   validate(schemas.editServiceRecordBody),
@@ -235,7 +220,6 @@ router.put(
     return res.status(200).json({ success: true, serviceRecords: asset.serviceRecords });
   })
 );
-
 router.delete(
   '/delete-service-record',
   validate(schemas.deleteServiceRecordBody),
@@ -254,7 +238,6 @@ router.delete(
     return res.status(200).json({ success: true, serviceRecords: asset.serviceRecords });
   })
 );
-
 router.delete(
   '/delete-asset/:id',
   validate(schemas.assetIdParam, 'params'),
@@ -279,7 +262,6 @@ router.delete(
     return res.status(200).json({ success: true, message: 'Asset and all associated files deleted successfully.' });
   })
 );
-
 router.get(
   '/fetch-assets',
   asyncHandler(async (expressRequest, expressResponse) => {
@@ -305,5 +287,4 @@ router.get(
     });
   })
 );
-
 module.exports = router;

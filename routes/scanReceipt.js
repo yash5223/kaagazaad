@@ -10,13 +10,8 @@ const uploadDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
-
-// Receipt scanning only ever makes sense for photographed/scanned images —
-// restrict both the extension (cheap, early check) and, after upload, the
-// actual sniffed file signature (authoritative check) to JPG/PNG.
 const RECEIPT_ALLOWED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png']);
 const RECEIPT_ALLOWED_MIMES = new Set(['image/jpeg', 'image/png']);
-
 const upload = multer({
   dest: uploadDir,
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -28,13 +23,6 @@ const upload = multer({
     return cb(null, true);
   },
 });
-
-/**
- * Authoritative check on the buffered-to-disk upload: sniffs the real file
- * signature rather than trusting the client-supplied mimetype or the
- * filename's extension. Deletes the temp file and responds 400 on
- * mismatch; otherwise calls next().
- */
 async function verifyReceiptImage(req, res, next) {
   if (!req.file) return next();
   try {

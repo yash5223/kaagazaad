@@ -8,6 +8,7 @@ const Asset = require('../models/Asset');
 const SharedDocument = require('../models/SharedDocument');
 const authMiddleware = require('../middleware/authMiddleware');
 const { validate, schemas } = require('../middleware/validators');
+const { joinLimiter } = require('../middleware/rateLimiters');
 const { createAlert } = require('./alertRoutes');
 const INVITE_EXPIRY_DAYS = 7;
 router.use(authMiddleware);
@@ -78,7 +79,7 @@ router.delete('/invites/:token', validate(schemas.inviteTokenParam, 'params'), a
     return res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-router.post('/join', validate(schemas.joinBody), async (req, res) => {
+router.post('/join', joinLimiter, validate(schemas.joinBody), async (req, res) => {
   try {
     const { token } = req.body;
     const joiner = await User.findById(req.user.id);

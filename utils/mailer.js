@@ -1,5 +1,4 @@
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
-
 const OTP_COPY = {
   password_reset: {
     subject: 'Your Kaagazaad password reset code',
@@ -14,7 +13,6 @@ const OTP_COPY = {
     textLabel: 'email verification code',
   },
 };
-
 async function sendOtpEmail(toEmail, otpCode, purpose = 'password_reset') {
   const apiKey = process.env.BREVO_API_KEY;
   if (!apiKey) {
@@ -64,5 +62,4 @@ async function sendOtpEmail(toEmail, otpCode, purpose = 'password_reset') {
     throw new Error(`Brevo API error (${response.status}): ${detail}`);
   }
 }
-
 module.exports = { sendOtpEmail };

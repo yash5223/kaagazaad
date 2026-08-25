@@ -13,12 +13,7 @@ const { checkLocked, recordFailure, recordSuccess } = require('../utils/accountL
 const { logSecurityEvent } = require('../utils/securityLog');
 const router = express.Router();
 const EMAIL_REGEX = /^[\w.\-]+@[\w-]+\.[a-zA-Z]{2,}$/;
-
-// Max wrong-code guesses allowed against a single OTP before it's
-// invalidated and the user has to request a new one. Keeps a 6-digit code
-// (1 in a million) from being brute-forced within its validity window.
 const OTP_MAX_ATTEMPTS = 5;
-
 function issueToken(user) {
   return jwt.sign(
     { id: user._id, customer_id: user.customer_id, email: user.email },
@@ -26,16 +21,6 @@ function issueToken(user) {
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
   );
 }
-
-/**
- * Looks up the active OTP doc for (contactInfo, purpose) and checks the
- * submitted code against it, tracking failed attempts on the doc itself
- * (rather than querying by contactInfo+otpCode directly, which would give
- * a wrong guess nothing to increment against). Returns:
- *   { ok: true, doc }                 - code matched, not expired/locked
- *   { ok: false, status, error }      - any failure, with an HTTP status
- *     and message ready to send straight back to the client
- */
 async function verifyOtpWithAttemptLimit({ contactInfo, otpCode, purpose }) {
   const doc = await Otp.findOne({ contactInfo, purpose });
   if (!doc) {
@@ -61,7 +46,6 @@ async function verifyOtpWithAttemptLimit({ contactInfo, otpCode, purpose }) {
   }
   return { ok: true, doc };
 }
-
 router.post('/register/send-otp', otpRequestLimiter, loginSlowDown, async (req, res) => {
   try {
     const { email } = req.body;
@@ -90,7 +74,6 @@ router.post('/register/send-otp', otpRequestLimiter, loginSlowDown, async (req, 
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/register/verify-otp', otpVerifyLimiter, async (req, res) => {
   try {
     const { email, otpCode } = req.body;
@@ -112,7 +95,6 @@ router.post('/register/verify-otp', otpVerifyLimiter, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/register', validate(schemas.registerPassword), async (req, res) => {
   try {
     const { firstName, lastName, fatherName, dob, gender, email, phone, aadhaar, passwordHash, verificationToken } = req.body;
@@ -189,7 +171,6 @@ router.post('/register', validate(schemas.registerPassword), async (req, res) =>
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/login', authLimiter, loginSlowDown, async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -200,8 +181,6 @@ router.post('/login', authLimiter, loginSlowDown, async (req, res) => {
     const user = await User.findOne({ email: cleanEmail });
     if (!user) {
       // Deliberately the same "not found" response whether or not the
-      // account exists — but still logged, since a wave of these against
-      // varied emails is itself a signal (enumeration/credential stuffing).
       logSecurityEvent('login_failure', { req, email: cleanEmail, meta: { reason: 'no_account' } });
       return res.status(404).json({ error: 'No account found with this email.' });
     }
@@ -253,7 +232,6 @@ router.post('/login', authLimiter, loginSlowDown, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/forgot-password/request', otpRequestLimiter, loginSlowDown, async (req, res) => {
   try {
     const { contactInfo } = req.body;
@@ -287,7 +265,6 @@ router.post('/forgot-password/request', otpRequestLimiter, loginSlowDown, async 
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/forgot-password/verify', otpVerifyLimiter, async (req, res) => {
   try {
     const { contactInfo, otpCode } = req.body;
@@ -305,7 +282,6 @@ router.post('/forgot-password/verify', otpVerifyLimiter, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/forgot-password/reset', otpVerifyLimiter, validate(schemas.resetPassword), async (req, res) => {
   try {
     const { contactInfo, otpCode, newPassword } = req.body;
@@ -322,9 +298,6 @@ router.post('/forgot-password/reset', otpVerifyLimiter, validate(schemas.resetPa
       { $or: [{ email: cleanContact }, { phone: cleanContact }] },
       {
         $set: { passwordHash: hashedNewPassword },
-        // A password reset is also a good moment to clear any standing
-        // login lockout — the person just proved account ownership via
-        // OTP, a stronger signal than the lockout was ever guarding against.
         $unset: { loginLockedUntil: '' },
       }
     );
@@ -336,7 +309,6 @@ router.post('/forgot-password/reset', otpVerifyLimiter, validate(schemas.resetPa
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/set-pin', authMiddleware, validate(schemas.pinBody), async (req, res) => {
   try {
     const { password, pin } = req.body;
@@ -354,8 +326,6 @@ router.post('/set-pin', authMiddleware, validate(schemas.pinBody), async (req, r
     const hashedPin = await bcrypt.hash(pin, 10);
     user.pinHash = hashedPin;
     user.pinEnabled = true;
-    // A freshly (re)set PIN gets a clean slate — any lockout from guesses
-    // against the old PIN no longer applies to this one.
     user.failedPinAttempts = 0;
     user.pinLockedUntil = null;
     await user.save({ validateModifiedOnly: true });
@@ -366,7 +336,6 @@ router.post('/set-pin', authMiddleware, validate(schemas.pinBody), async (req, r
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/verify-pin', authMiddleware, async (req, res) => {
   try {
     const { pin } = req.body;
@@ -420,7 +389,6 @@ router.post('/verify-pin', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.post('/remove-pin', authMiddleware, async (req, res) => {
   try {
     const { password } = req.body;
@@ -447,7 +415,6 @@ router.post('/remove-pin', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.get('/pin-status', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
@@ -460,15 +427,12 @@ router.get('/pin-status', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong on our end. Please try again shortly.' });
   }
 });
-
 router.get('/profile', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ error: 'No account found for this session.' });
     }
-    // Aadhaar is only ever decrypted here, for the verified owner viewing
-    // their own profile — never in any list/search/other-user-facing route.
     let aadhaar = '';
     try {
       aadhaar = decryptAadhaar(user.aadhaarEncrypted);

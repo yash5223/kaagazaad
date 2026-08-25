@@ -16,12 +16,13 @@ const Invite = require('./models/Invite');
 const { globalLimiter } = require('./middleware/rateLimiters');
 const { errorHandler } = require('./middleware/errorHandler');
 const { requestSignature } = require('./middleware/requestSignature');
+const { joinLimiter } = require('./middleware/rateLimiters');
+const { logSecurityEvent } = require('./utils/securityLog');
 const app = express();
-
-// Optional error/uptime monitoring: if SENTRY_DSN is set, initialize
-// Sentry as early as possible so it can capture request context. When
-// unset (e.g. local dev), this is a complete no-op — nothing else in the
-// app depends on it being configured. See SECURITY.md for setup notes.
+if (process.env.NODE_ENV === 'production' && !process.env.APP_SIGNING_SECRET) {
+  console.error('[startup] APP_SIGNING_SECRET is not set — refusing to start in production without app request signing.');
+  process.exit(1);
+}
 let Sentry = null;
 if (process.env.SENTRY_DSN) {
   Sentry = require('@sentry/node');
@@ -34,22 +35,7 @@ if (process.env.SENTRY_DSN) {
 } else {
   console.warn('[monitoring] SENTRY_DSN not set — error reporting to Sentry is disabled. See SECURITY.md.');
 }
-
-// Render (and most PaaS hosts) put the app behind a reverse proxy, so the
-// real client IP arrives via X-Forwarded-For rather than the raw socket
-// address. `trust proxy` tells Express (and therefore express-rate-limit
-// and req.ip, used by utils/securityLog.js) to read that header instead of
-// logging/rate-limiting every request as if it came from the proxy itself.
 app.set('trust proxy', 1);
-
-// Sets a battery of security-related HTTP headers (X-Content-Type-Options,
-// X-Frame-Options, HSTS, etc). A real Content-Security-Policy is enabled
-// (rather than disabled) because this app DOES render one HTML page —
-// /join/:token — and a locked-down CSP costs nothing on the pure-JSON API
-// routes while meaningfully limiting what an injected/compromised script
-// could do on that page (no external scripts, no inline scripts except
-// the one we explicitly nonce below, no framing). See the /join route for
-// how the nonce is generated and applied.
 app.use((req, res, next) => {
   res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
   next();
@@ -60,7 +46,7 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.cspNonce}'`],
-      styleSrc: ["'self'", "'unsafe-inline'"], // /join uses a small inline <style> block, no external stylesheets
+      styleSrc: ["'self'", "'unsafe-inline'"], 
       imgSrc: ["'self'", 'data:'],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
@@ -69,15 +55,15 @@ app.use(helmet({
       connectSrc: ["'self'"],
     },
   },
-  crossOriginResourcePolicy: { policy: 'cross-origin' }, // uploaded documents are legitimately fetched by the Flutter client from a different origin
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, 
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  referrerPolicy: { policy: 'no-referrer' },
 }));
-
-// CORS is restricted to an explicit allowlist read from ALLOWED_ORIGINS
-// (comma-separated) rather than left wide open. Requests with no Origin
-// header (native mobile apps, curl, server-to-server calls) are allowed
-// through, since they're not subject to the same-origin policy CORS
-// protects against in the first place — mobile HTTP clients don't send an
-// Origin header the way browsers do.
+app.use((req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  next();
+});
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((o) => o.trim())
@@ -96,53 +82,17 @@ app.use(cors({
   },
   credentials: true,
 }));
-
-// Body size caps: this API deals in small JSON payloads (form fields,
-// tokens, ids) — file uploads go through multer on their own routes with
-// their own limits (see routes/assetRoutes.js, routes/scanReceipt.js), not
-// through this JSON body parser. Capping it here stops a client from
-// sending a huge JSON body to routes that were never meant to receive one.
-// The `verify` hook stashes the exact raw bytes received on req.rawBody —
-// needed by middleware/requestSignature.js, since a signature computed
-// over the RE-SERIALIZED (parsed-then-stringified) body would not match
-// one the client computed over the bytes it actually sent.
 function captureRawBody(req, _res, buf) {
   req.rawBody = buf.toString('utf8');
 }
 app.use(express.json({ limit: '1mb', verify: captureRawBody }));
 app.use(express.urlencoded({ extended: true, limit: '1mb', verify: captureRawBody }));
-
-// Defense-in-depth against NoSQL injection: strips any request key that
-// starts with `$` or contains `.` from body/query/params before it ever
-// reaches a route handler or Mongoose query. middleware/validators.js
-// (zod) is the primary defense — it defines exactly what shape each field
-// may take — but this is a cheap blanket backstop for any field a route
-// or future change forgets to run through validate().
 app.use(mongoSanitize());
-
-// HTTP Parameter Pollution guard: if a client sends the same query-string
-// key twice (?role=view&role=admin), Express normally hands the route an
-// array; a route written assuming a single string can behave unexpectedly
-// on the duplicated value. This collapses duplicates down to the last
-// value before routes ever see them.
 app.use(hpp());
-
-// Global rate limit applied to every request. Individual auth/OTP routes
-// layer tighter limits on top of this (see routes/userRoutes.js).
 app.use(globalLimiter);
-
-// App-level request signing (HMAC + anti-replay) — see
-// middleware/requestSignature.js for the full rationale. This sits BEFORE
-// authMiddleware in the stack (which is applied per-route), so a forged
-// request is rejected before it ever gets to spend a JWT-verification
-// cycle. It automatically no-ops (fails open) whenever APP_SIGNING_SECRET
-// isn't set in the environment, so it's safe to deploy ahead of an
-// updated, signing-capable client build — set the env var once every
-// client in the field has been updated to sign its requests.
 app.use('/api', requestSignature({ required: true }));
-
 app.use((req, res, next) => {
-  console.log(`[${req.method}] ${req.url}`);
+  console.log(`[${req.method}] ${req.originalUrl.split('?')[0]}`);
   next();
 });
 app.use('/api/users', userRoutes);
@@ -161,10 +111,6 @@ if (!/^mongodb(\+srv)?:\/\//.test(MONGODB_URI)) {
   console.error('[startup] MONGODB_URI does not look like a valid MongoDB connection string.');
   process.exit(1);
 }
-// A `mongodb+srv://` URI (Atlas's standard format) implies TLS is on by
-// default; a plain `mongodb://` URI does not. Warn loudly rather than
-// silently connecting without encryption in transit if someone points this
-// at a non-Atlas / manually-configured cluster.
 if (MONGODB_URI.startsWith('mongodb://') && !/[?&]tls=true/.test(MONGODB_URI)) {
   console.warn(
     '[startup] MONGODB_URI uses the plain mongodb:// scheme without an explicit tls=true option. ' +
@@ -178,13 +124,6 @@ mongoose.connect(MONGODB_URI, {
 })
   .then(async () => {
     console.log('Connected to MongoDB Atlas');
-    // Keep every model's indexes in sync with its schema. This matters a lot
-    // for SharedDocument: an older deploy created a FULLY unique index on
-    // (ownerCustomerId, receiverEmail, assetId), which silently blocked a
-    // document from ever being shared to the same person a second time
-    // (even after being revoked). The current schema only wants that
-    // uniqueness enforced among ACTIVE shares (a partial index), so on boot
-    // we drop the stale index and rebuild the correct one automatically.
     try {
       const SharedDocument = require('./models/SharedDocument');
       await SharedDocument.syncIndexes();
@@ -192,10 +131,6 @@ mongoose.connect(MONGODB_URI, {
     } catch (indexErr) {
       console.error('Failed to sync SharedDocument indexes:', indexErr);
     }
-    // Same story for User: aadhaarHash replaces the old unique index on the
-    // plaintext `aadhaar` field now that Aadhaar numbers are stored
-    // encrypted. Sync so the stale index doesn't linger in existing
-    // deployments.
     try {
       const User = require('./models/User');
       await User.syncIndexes();
@@ -208,13 +143,8 @@ mongoose.connect(MONGODB_URI, {
 app.get('/', (req, res) => {
   res.send('Server is running');
 });
-
-// Uptime-monitor target (UptimeRobot, Better Stack, Render health checks,
-// etc.) — reports whether the process is up AND whether it can actually
-// reach MongoDB, since a process that's alive but DB-disconnected still
-// can't serve real traffic.
 app.get('/healthz', (req, res) => {
-  const dbState = mongoose.connection.readyState; // 1 = connected
+  const dbState = mongoose.connection.readyState; 
   const ok = dbState === 1;
   res.status(ok ? 200 : 503).json({
     status: ok ? 'ok' : 'degraded',
@@ -222,7 +152,18 @@ app.get('/healthz', (req, res) => {
     uptimeSeconds: Math.round(process.uptime()),
   });
 });
-app.get('/join/:token', async (req, res) => {
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+function safeJsonForScript(value) {
+  return JSON.stringify(value).replace(/\//g, '\\/');
+}
+app.get('/join/:token', joinLimiter, async (req, res) => {
   const { token } = req.params;
   let statusMessage = 'This invite link is invalid.';
   let statusOk = false;
@@ -265,10 +206,10 @@ app.get('/join/:token', async (req, res) => {
 <body>
   <div class="card">
     <h1>Kaagazaad</h1>
-    <p>${statusMessage}</p>
+    <p>${escapeHtml(statusMessage)}</p>
     ${statusOk ? `
-      <div class="token" id="tokenBox">${token}</div>
-      <button onclick="window.location.href='${deepLink}'">Open in Kaagazaad app</button>
+      <div class="token" id="tokenBox">${escapeHtml(token)}</div>
+      <button onclick="window.location.href=${safeJsonForScript(deepLink)}">Open in Kaagazaad app</button>
       <button class="secondary" onclick="copyToken()">Copy invite code</button>
       <p style="font-size:13px; margin-top:16px;">
         If the app doesn't open automatically, open Kaagazaad and enter this code
@@ -278,10 +219,10 @@ app.get('/join/:token', async (req, res) => {
   </div>
   <script nonce="${res.locals.cspNonce}">
     function copyToken() {
-      navigator.clipboard.writeText(${JSON.stringify(token)});
+      navigator.clipboard.writeText(${safeJsonForScript(token)});
       alert('Invite code copied');
     }
-    ${statusOk ? `window.location.href = ${JSON.stringify(deepLink)};` : ''}
+    ${statusOk ? `window.location.href = ${safeJsonForScript(deepLink)};` : ''}
   </script>
 </body>
 </html>`);
@@ -290,13 +231,7 @@ app.get('/join/:token', async (req, res) => {
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found.' });
 });
-
-// Central error handler — must be registered last. Catches anything routes
-// pass to next(err) or that an asyncHandler-wrapped route throws, and is
-// the single place allowed to decide what error detail (if any) reaches
-// the client. See middleware/errorHandler.js.
 app.use(errorHandler);
-
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
