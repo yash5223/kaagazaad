@@ -7,7 +7,7 @@ const Otp = require('../models/Otp');
 const { sendOtpEmail } = require('../utils/mailer');
 const authMiddleware = require('../middleware/authMiddleware');
 const { encryptAadhaar, decryptAadhaar, hashAadhaar } = require('../utils/aadhaarCrypto');
-const { authLimiter, otpRequestLimiter, otpVerifyLimiter } = require('../middleware/rateLimiters');
+const { authLimiter, otpRequestLimiter, otpVerifyLimiter, loginSlowDown } = require('../middleware/rateLimiters');
 const { validate, schemas } = require('../middleware/validators');
 const { checkLocked, recordFailure, recordSuccess } = require('../utils/accountLockout');
 const { logSecurityEvent } = require('../utils/securityLog');
@@ -62,7 +62,7 @@ async function verifyOtpWithAttemptLimit({ contactInfo, otpCode, purpose }) {
   return { ok: true, doc };
 }
 
-router.post('/register/send-otp', otpRequestLimiter, async (req, res) => {
+router.post('/register/send-otp', otpRequestLimiter, loginSlowDown, async (req, res) => {
   try {
     const { email } = req.body;
     const cleanEmail = (email || '').toLowerCase().trim();
@@ -190,7 +190,7 @@ router.post('/register', validate(schemas.registerPassword), async (req, res) =>
   }
 });
 
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', authLimiter, loginSlowDown, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -254,7 +254,7 @@ router.post('/login', authLimiter, async (req, res) => {
   }
 });
 
-router.post('/forgot-password/request', otpRequestLimiter, async (req, res) => {
+router.post('/forgot-password/request', otpRequestLimiter, loginSlowDown, async (req, res) => {
   try {
     const { contactInfo } = req.body;
     if (!contactInfo || !contactInfo.trim()) {

@@ -3,6 +3,9 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
+const crypto = require('crypto');
+const mongoSanitize = require('express-mongo-sanitize');
+const hpp = require('hpp');
 const userRoutes = require('./routes/userRoutes');
 const scanReceiptRoutes = require('./routes/scanReceipt');
 const assetRoutes = require('./routes/assetRoutes');
@@ -12,6 +15,7 @@ const { router: alertRoutes } = require('./routes/alertRoutes');
 const Invite = require('./models/Invite');
 const { globalLimiter } = require('./middleware/rateLimiters');
 const { errorHandler } = require('./middleware/errorHandler');
+const { requestSignature } = require('./middleware/requestSignature');
 const app = express();
 
 // Optional error/uptime monitoring: if SENTRY_DSN is set, initialize
@@ -39,13 +43,34 @@ if (process.env.SENTRY_DSN) {
 app.set('trust proxy', 1);
 
 // Sets a battery of security-related HTTP headers (X-Content-Type-Options,
-// X-Frame-Options, HSTS, etc). `contentSecurityPolicy` is off because this
-// is a JSON API with no HTML views of its own to lock down (the one HTML
-// page we do render, /join/:token, is a simple static invite landing page
-// with no user-controlled script execution) — if that page grows more
-// interactivity later, revisit this and add a real CSP instead of leaving
-// it disabled.
-app.use(helmet({ contentSecurityPolicy: false }));
+// X-Frame-Options, HSTS, etc). A real Content-Security-Policy is enabled
+// (rather than disabled) because this app DOES render one HTML page —
+// /join/:token — and a locked-down CSP costs nothing on the pure-JSON API
+// routes while meaningfully limiting what an injected/compromised script
+// could do on that page (no external scripts, no inline scripts except
+// the one we explicitly nonce below, no framing). See the /join route for
+// how the nonce is generated and applied.
+app.use((req, res, next) => {
+  res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+  next();
+});
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.cspNonce}'`],
+      styleSrc: ["'self'", "'unsafe-inline'"], // /join uses a small inline <style> block, no external stylesheets
+      imgSrc: ["'self'", 'data:'],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'none'"],
+      formAction: ["'self'"],
+      connectSrc: ["'self'"],
+    },
+  },
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // uploaded documents are legitimately fetched by the Flutter client from a different origin
+}));
 
 // CORS is restricted to an explicit allowlist read from ALLOWED_ORIGINS
 // (comma-separated) rather than left wide open. Requests with no Origin
@@ -77,12 +102,44 @@ app.use(cors({
 // their own limits (see routes/assetRoutes.js, routes/scanReceipt.js), not
 // through this JSON body parser. Capping it here stops a client from
 // sending a huge JSON body to routes that were never meant to receive one.
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+// The `verify` hook stashes the exact raw bytes received on req.rawBody —
+// needed by middleware/requestSignature.js, since a signature computed
+// over the RE-SERIALIZED (parsed-then-stringified) body would not match
+// one the client computed over the bytes it actually sent.
+function captureRawBody(req, _res, buf) {
+  req.rawBody = buf.toString('utf8');
+}
+app.use(express.json({ limit: '1mb', verify: captureRawBody }));
+app.use(express.urlencoded({ extended: true, limit: '1mb', verify: captureRawBody }));
+
+// Defense-in-depth against NoSQL injection: strips any request key that
+// starts with `$` or contains `.` from body/query/params before it ever
+// reaches a route handler or Mongoose query. middleware/validators.js
+// (zod) is the primary defense — it defines exactly what shape each field
+// may take — but this is a cheap blanket backstop for any field a route
+// or future change forgets to run through validate().
+app.use(mongoSanitize());
+
+// HTTP Parameter Pollution guard: if a client sends the same query-string
+// key twice (?role=view&role=admin), Express normally hands the route an
+// array; a route written assuming a single string can behave unexpectedly
+// on the duplicated value. This collapses duplicates down to the last
+// value before routes ever see them.
+app.use(hpp());
 
 // Global rate limit applied to every request. Individual auth/OTP routes
 // layer tighter limits on top of this (see routes/userRoutes.js).
 app.use(globalLimiter);
+
+// App-level request signing (HMAC + anti-replay) — see
+// middleware/requestSignature.js for the full rationale. This sits BEFORE
+// authMiddleware in the stack (which is applied per-route), so a forged
+// request is rejected before it ever gets to spend a JWT-verification
+// cycle. It automatically no-ops (fails open) whenever APP_SIGNING_SECRET
+// isn't set in the environment, so it's safe to deploy ahead of an
+// updated, signing-capable client build — set the env var once every
+// client in the field has been updated to sign its requests.
+app.use('/api', requestSignature({ required: true }));
 
 app.use((req, res, next) => {
   console.log(`[${req.method}] ${req.url}`);
@@ -219,7 +276,7 @@ app.get('/join/:token', async (req, res) => {
       </p>
     ` : ''}
   </div>
-  <script>
+  <script nonce="${res.locals.cspNonce}">
     function copyToken() {
       navigator.clipboard.writeText(${JSON.stringify(token)});
       alert('Invite code copied');

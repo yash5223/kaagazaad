@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const slowDown = require('express-slow-down');
 
 // Shared JSON error handler so a rate-limit hit looks like every other API
 // error response instead of express-rate-limit's default plain text.
@@ -7,6 +8,21 @@ function jsonRateLimitHandler(message) {
     res.status(429).json({ error: message });
   };
 }
+
+// Progressive throttle layered IN FRONT of the hard limiters below on the
+// most sensitive endpoints (login, OTP). Hard limits (authLimiter etc.)
+// are a wall: once you hit them, every request 429s until the window
+// resets. This is a ramp: each successive request in the window gets
+// slower than the last, so a scripted brute-force loop bleeds time long
+// before it ever reaches the hard wall, while a real user who mistypes a
+// password once or twice barely notices. Two different shapes of
+// friction, stacked, rather than one limiter doing both jobs.
+const loginSlowDown = slowDown({
+  windowMs: 15 * 60 * 1000,
+  delayAfter: 3, // first 3 requests in the window are at full speed
+  delayMs: (hits) => (hits - 3) * 500, // then +500ms per request, growing
+  maxDelayMs: 8000, // never delay a single request more than 8s
+});
 
 // Global baseline: generous enough for normal app usage, tight enough to
 // blunt scripted abuse hitting the API as a whole.
@@ -52,4 +68,4 @@ const otpVerifyLimiter = rateLimit({
   handler: jsonRateLimitHandler('Too many attempts. Please try again in a few minutes.'),
 });
 
-module.exports = { globalLimiter, authLimiter, otpRequestLimiter, otpVerifyLimiter };
+module.exports = { globalLimiter, authLimiter, otpRequestLimiter, otpVerifyLimiter, loginSlowDown };
