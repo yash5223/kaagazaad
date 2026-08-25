@@ -219,7 +219,7 @@ router.post('/login', authLimiter, loginSlowDown, async (req, res) => {
         lockedUntilField: 'loginLockedUntil',
         lockoutCountField: 'loginLockoutCount',
       });
-      await user.save();
+      await user.save({ validateModifiedOnly: true });
       logSecurityEvent(failResult.justLocked ? 'login_lockout' : 'login_failure', {
         req,
         userId: user.customer_id,
@@ -234,7 +234,7 @@ router.post('/login', authLimiter, loginSlowDown, async (req, res) => {
       return res.status(400).json({ error: 'Incorrect password.' });
     }
     recordSuccess(user, { attemptsField: 'failedLoginAttempts', lockedUntilField: 'loginLockedUntil' });
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
     logSecurityEvent('login_success', { req, userId: user.customer_id, email: cleanEmail });
     const token = issueToken(user);
     res.status(200).json({
@@ -358,7 +358,7 @@ router.post('/set-pin', authMiddleware, validate(schemas.pinBody), async (req, r
     // against the old PIN no longer applies to this one.
     user.failedPinAttempts = 0;
     user.pinLockedUntil = null;
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
     logSecurityEvent('pin_set', { req, userId: user.customer_id, email: user.email });
     res.status(200).json({ success: true, message: '2FA PIN saved successfully.', pinEnabled: true });
   } catch (err) {
@@ -396,7 +396,7 @@ router.post('/verify-pin', authMiddleware, async (req, res) => {
         lockedUntilField: 'pinLockedUntil',
         lockoutCountField: 'pinLockoutCount',
       });
-      await user.save();
+      await user.save({ validateModifiedOnly: true });
       logSecurityEvent(failResult.justLocked ? 'pin_lockout' : 'pin_failure', {
         req,
         userId: user.customer_id,
@@ -413,7 +413,7 @@ router.post('/verify-pin', authMiddleware, async (req, res) => {
       return res.status(200).json({ success: false, valid: false, remainingAttempts: failResult.remainingAttempts });
     }
     recordSuccess(user, { attemptsField: 'failedPinAttempts', lockedUntilField: 'pinLockedUntil' });
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
     res.status(200).json({ success: true, valid: true });
   } catch (err) {
     console.error('[server error]', err);
@@ -439,7 +439,7 @@ router.post('/remove-pin', authMiddleware, async (req, res) => {
     user.pinEnabled = false;
     user.failedPinAttempts = 0;
     user.pinLockedUntil = null;
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
     logSecurityEvent('pin_removed', { req, userId: user.customer_id, email: user.email });
     res.status(200).json({ success: true, message: '2FA PIN removed successfully.', pinEnabled: false });
   } catch (err) {
