@@ -6,8 +6,16 @@ const User = require('../models/User');
 const Otp = require('../models/Otp');
 const { sendOtpEmail } = require('../utils/mailer');
 const authMiddleware = require('../middleware/authMiddleware');
+const { encryptAadhaar, decryptAadhaar, hashAadhaar } = require('../utils/aadhaarCrypto');
+const { authLimiter, otpRequestLimiter, otpVerifyLimiter } = require('../middleware/rateLimiters');
 const router = express.Router();
 const EMAIL_REGEX = /^[\w.\-]+@[\w-]+\.[a-zA-Z]{2,}$/;
+
+// Max wrong-code guesses allowed against a single OTP before it's
+// invalidated and the user has to request a new one. Keeps a 6-digit code
+// (1 in a million) from being brute-forced within its validity window.
+const OTP_MAX_ATTEMPTS = 5;
+
 function issueToken(user) {
   return jwt.sign(
     { id: user._id, customer_id: user.customer_id, email: user.email },
@@ -15,7 +23,43 @@ function issueToken(user) {
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
   );
 }
-router.post('/register/send-otp', async (req, res) => {
+
+/**
+ * Looks up the active OTP doc for (contactInfo, purpose) and checks the
+ * submitted code against it, tracking failed attempts on the doc itself
+ * (rather than querying by contactInfo+otpCode directly, which would give
+ * a wrong guess nothing to increment against). Returns:
+ *   { ok: true, doc }                 - code matched, not expired/locked
+ *   { ok: false, status, error }      - any failure, with an HTTP status
+ *     and message ready to send straight back to the client
+ */
+async function verifyOtpWithAttemptLimit({ contactInfo, otpCode, purpose }) {
+  const doc = await Otp.findOne({ contactInfo, purpose });
+  if (!doc) {
+    return { ok: false, status: 400, error: 'Invalid or expired verification code.' };
+  }
+  if (doc.expiresAt < new Date()) {
+    await Otp.deleteOne({ _id: doc._id });
+    return { ok: false, status: 400, error: 'This code has expired. Please request a new one.' };
+  }
+  if (doc.attempts >= OTP_MAX_ATTEMPTS) {
+    await Otp.deleteOne({ _id: doc._id });
+    return { ok: false, status: 429, error: 'Too many incorrect attempts. Please request a new code.' };
+  }
+  if (doc.otpCode !== otpCode) {
+    doc.attempts += 1;
+    await doc.save();
+    const remaining = OTP_MAX_ATTEMPTS - doc.attempts;
+    if (remaining <= 0) {
+      await Otp.deleteOne({ _id: doc._id });
+      return { ok: false, status: 429, error: 'Too many incorrect attempts. Please request a new code.' };
+    }
+    return { ok: false, status: 400, error: `Invalid verification code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.` };
+  }
+  return { ok: true, doc };
+}
+
+router.post('/register/send-otp', otpRequestLimiter, async (req, res) => {
   try {
     const { email } = req.body;
     const cleanEmail = (email || '').toLowerCase().trim();
@@ -42,22 +86,19 @@ router.post('/register/send-otp', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/register/verify-otp', async (req, res) => {
+
+router.post('/register/verify-otp', otpVerifyLimiter, async (req, res) => {
   try {
     const { email, otpCode } = req.body;
     const cleanEmail = (email || '').toLowerCase().trim();
     if (!cleanEmail || !otpCode) {
       return res.status(400).json({ error: 'Email and verification code are required.' });
     }
-    const match = await Otp.findOne({ contactInfo: cleanEmail, otpCode, purpose: 'register' });
-    if (!match) {
-      return res.status(400).json({ error: 'Invalid verification code.' });
+    const result = await verifyOtpWithAttemptLimit({ contactInfo: cleanEmail, otpCode, purpose: 'register' });
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error });
     }
-    if (match.expiresAt < new Date()) {
-      await Otp.deleteOne({ _id: match._id });
-      return res.status(400).json({ error: 'This code has expired. Please request a new one.' });
-    }
-    await Otp.deleteOne({ _id: match._id });
+    await Otp.deleteOne({ _id: result.doc._id });
     const verificationToken = crypto.randomBytes(24).toString('hex');
     const tokenExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
     await Otp.create({ contactInfo: cleanEmail, otpCode: verificationToken, expiresAt: tokenExpiresAt, purpose: 'register_verified' });
@@ -66,10 +107,17 @@ router.post('/register/verify-otp', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.post('/register', async (req, res) => {
   try {
-    const { fullName, dob, gender, email, phone, aadhaar, passwordHash, verificationToken } = req.body;
-    const cleanEmail = email.toLowerCase().trim();
+    const { firstName, lastName, fatherName, dob, gender, email, phone, aadhaar, passwordHash, verificationToken } = req.body;
+    const cleanEmail = (email || '').toLowerCase().trim();
+    const cleanFirstName = (firstName || '').trim();
+    const cleanLastName = (lastName || '').trim();
+    const cleanFatherName = (fatherName || '').trim(); // optional
+    if (!cleanFirstName || !cleanLastName) {
+      return res.status(400).json({ error: 'First name and last name are required.' });
+    }
     if (!verificationToken) {
       return res.status(400).json({ error: 'Email verification is required before creating an account.' });
     }
@@ -87,7 +135,12 @@ router.post('/register', async (req, res) => {
     if (await User.findOne({ phone: phone.trim() })) {
       return res.status(400).json({ error: 'Phone number already registered.' });
     }
-    if (await User.findOne({ aadhaar: aadhaar.trim() })) {
+    const cleanAadhaar = (aadhaar || '').trim();
+    if (!/^\d{12}$/.test(cleanAadhaar)) {
+      return res.status(400).json({ error: 'A valid 12-digit Aadhaar number is required.' });
+    }
+    const aadhaarHash = hashAadhaar(cleanAadhaar);
+    if (await User.findOne({ aadhaarHash })) {
       return res.status(400).json({ error: 'Aadhaar card number already registered.' });
     }
     const lastUser = await User.findOne().sort({ _id: -1 });
@@ -102,12 +155,15 @@ router.post('/register', async (req, res) => {
     const generatedCustomerId = `CUST_${nextNum}`;
     const hashedPassword = await bcrypt.hash(passwordHash, 10);
     const newUser = await User.create({
-      fullName,
+      firstName: cleanFirstName,
+      lastName: cleanLastName,
+      fatherName: cleanFatherName,
       dob: new Date(dob),
       gender,
       email: cleanEmail,
       phone: phone.trim(),
-      aadhaar: aadhaar.trim(),
+      aadhaarEncrypted: encryptAadhaar(cleanAadhaar),
+      aadhaarHash,
       passwordHash: hashedPassword,
       customer_id: generatedCustomerId,
       subscription_plan: "",
@@ -126,7 +182,8 @@ router.post('/register', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/login', async (req, res) => {
+
+router.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -156,7 +213,8 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/forgot-password/request', async (req, res) => {
+
+router.post('/forgot-password/request', otpRequestLimiter, async (req, res) => {
   try {
     const { contactInfo } = req.body;
     if (!contactInfo || !contactInfo.trim()) {
@@ -174,13 +232,13 @@ router.post('/forgot-password/request', async (req, res) => {
     }
     const otpCode = String(Math.floor(100000 + Math.random() * 900000));
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-    await Otp.deleteMany({ contactInfo: cleanContact });
-    await Otp.create({ contactInfo: cleanContact, otpCode, expiresAt });
+    await Otp.deleteMany({ contactInfo: cleanContact, purpose: 'password_reset' });
+    await Otp.create({ contactInfo: cleanContact, otpCode, expiresAt, purpose: 'password_reset' });
     try {
       await sendOtpEmail(cleanContact, otpCode);
     } catch (mailErr) {
       console.error('[OTP] Failed to send email:', mailErr.message);
-      await Otp.deleteMany({ contactInfo: cleanContact });
+      await Otp.deleteMany({ contactInfo: cleanContact, purpose: 'password_reset' });
       return res.status(500).json({ error: 'Could not send verification email. Please try again in a moment.' });
     }
     res.status(200).json({ success: true, message: 'Verification code sent to your email' });
@@ -188,51 +246,47 @@ router.post('/forgot-password/request', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/forgot-password/verify', async (req, res) => {
+
+router.post('/forgot-password/verify', otpVerifyLimiter, async (req, res) => {
   try {
     const { contactInfo, otpCode } = req.body;
-    const match = await Otp.findOne({
-      contactInfo: contactInfo.toLowerCase().trim(),
-      otpCode: otpCode
-    });
-    if (!match) {
-      return res.status(400).json({ error: 'Invalid verification code.' });
+    if (!contactInfo || !otpCode) {
+      return res.status(400).json({ error: 'Contact info and verification code are required.' });
     }
-    if (match.expiresAt < new Date()) {
-      await Otp.deleteOne({ _id: match._id });
-      return res.status(400).json({ error: 'This code has expired. Please request a new one.' });
+    const cleanContact = contactInfo.toLowerCase().trim();
+    const result = await verifyOtpWithAttemptLimit({ contactInfo: cleanContact, otpCode, purpose: 'password_reset' });
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error });
     }
     res.status(200).json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-router.post('/forgot-password/reset', async (req, res) => {
+
+router.post('/forgot-password/reset', otpVerifyLimiter, async (req, res) => {
   try {
     const { contactInfo, otpCode, newPassword } = req.body;
     if (!contactInfo || !otpCode || !newPassword) {
       return res.status(400).json({ error: 'Contact info, verification code and new password are required.' });
     }
     const cleanContact = contactInfo.toLowerCase().trim();
-    const match = await Otp.findOne({ contactInfo: cleanContact, otpCode });
-    if (!match) {
-      return res.status(400).json({ error: 'Invalid or already-used verification code.' });
-    }
-    if (match.expiresAt < new Date()) {
-      await Otp.deleteOne({ _id: match._id });
-      return res.status(400).json({ error: 'This code has expired. Please request a new one.' });
+    const result = await verifyOtpWithAttemptLimit({ contactInfo: cleanContact, otpCode, purpose: 'password_reset' });
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error });
     }
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
     await User.updateMany(
       { $or: [{ email: cleanContact }, { phone: cleanContact }] },
       { $set: { passwordHash: hashedNewPassword } }
     );
-    await Otp.deleteMany({ contactInfo: cleanContact });
+    await Otp.deleteMany({ contactInfo: cleanContact, purpose: 'password_reset' });
     res.status(200).json({ success: true, message: 'Password updated successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.post('/set-pin', authMiddleware, async (req, res) => {
   try {
     const { password, pin } = req.body;
@@ -259,6 +313,7 @@ router.post('/set-pin', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.post('/verify-pin', authMiddleware, async (req, res) => {
   try {
     const { pin } = req.body;
@@ -281,6 +336,7 @@ router.post('/verify-pin', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.post('/remove-pin', authMiddleware, async (req, res) => {
   try {
     const { password } = req.body;
@@ -303,6 +359,7 @@ router.post('/remove-pin', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.get('/pin-status', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
@@ -314,21 +371,33 @@ router.get('/pin-status', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.get('/profile', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ error: 'No account found for this session.' });
     }
+    // Aadhaar is only ever decrypted here, for the verified owner viewing
+    // their own profile — never in any list/search/other-user-facing route.
+    let aadhaar = '';
+    try {
+      aadhaar = decryptAadhaar(user.aadhaarEncrypted);
+    } catch (decryptErr) {
+      console.error('[profile] Failed to decrypt Aadhaar for user', user._id, decryptErr.message);
+    }
     res.status(200).json({
       success: true,
       user: {
+        firstName: user.firstName,
+        lastName: user.lastName,
+        fatherName: user.fatherName,
         fullName: user.fullName,
         email: user.email,
         phone: user.phone,
         dob: user.dob,
         gender: user.gender,
-        aadhaar: user.aadhaar,
+        aadhaar,
         customer_id: user.customer_id,
         subscription_plan: user.subscription_plan,
       },

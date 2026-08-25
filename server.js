@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const helmet = require('helmet');
 const userRoutes = require('./routes/userRoutes');
 const scanReceiptRoutes = require('./routes/scanReceipt');
 const assetRoutes = require('./routes/assetRoutes');
@@ -9,9 +10,55 @@ const vaultRoutes = require('./routes/vaultRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const { router: alertRoutes } = require('./routes/alertRoutes');
 const Invite = require('./models/Invite');
+const { globalLimiter } = require('./middleware/rateLimiters');
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// Sets a battery of security-related HTTP headers (X-Content-Type-Options,
+// X-Frame-Options, HSTS, etc). `contentSecurityPolicy` is off because this
+// is a JSON API with no HTML views of its own to lock down (the one HTML
+// page we do render, /join/:token, is a simple static invite landing page
+// with no user-controlled script execution) — if that page grows more
+// interactivity later, revisit this and add a real CSP instead of leaving
+// it disabled.
+app.use(helmet({ contentSecurityPolicy: false }));
+
+// CORS is restricted to an explicit allowlist read from ALLOWED_ORIGINS
+// (comma-separated) rather than left wide open. Requests with no Origin
+// header (native mobile apps, curl, server-to-server calls) are allowed
+// through, since they're not subject to the same-origin policy CORS
+// protects against in the first place — mobile HTTP clients don't send an
+// Origin header the way browsers do.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+if (allowedOrigins.length === 0) {
+  console.warn(
+    '[cors] ALLOWED_ORIGINS is not set — no browser origins are allowlisted. ' +
+    'Set ALLOWED_ORIGINS (comma-separated) in your environment for any web clients that need access.'
+  );
+}
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true); // native app / server-to-server, no Origin header
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
+
+// Body size caps: this API deals in small JSON payloads (form fields,
+// tokens, ids) — file uploads go through multer on their own routes with
+// their own limits (see routes/assetRoutes.js, routes/scanReceipt.js), not
+// through this JSON body parser. Capping it here stops a client from
+// sending a huge JSON body to routes that were never meant to receive one.
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Global rate limit applied to every request. Individual auth/OTP routes
+// layer tighter limits on top of this (see routes/userRoutes.js).
+app.use(globalLimiter);
+
 app.use((req, res, next) => {
   console.log(`[${req.method}] ${req.url}`);
   next();
@@ -43,6 +90,17 @@ mongoose.connect(MONGODB_URI, {
       console.log('SharedDocument indexes synced.');
     } catch (indexErr) {
       console.error('Failed to sync SharedDocument indexes:', indexErr);
+    }
+    // Same story for User: aadhaarHash replaces the old unique index on the
+    // plaintext `aadhaar` field now that Aadhaar numbers are stored
+    // encrypted. Sync so the stale index doesn't linger in existing
+    // deployments.
+    try {
+      const User = require('./models/User');
+      await User.syncIndexes();
+      console.log('User indexes synced.');
+    } catch (indexErr) {
+      console.error('Failed to sync User indexes:', indexErr);
     }
   })
   .catch((err) => console.error('Connection error:', err));
