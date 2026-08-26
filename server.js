@@ -90,7 +90,7 @@ app.use(express.urlencoded({ extended: true, limit: '1mb', verify: captureRawBod
 app.use(mongoSanitize());
 app.use(hpp());
 app.use(globalLimiter);
-app.use('/api', requestSignature({ required: true }));
+app.use('/api', requestSignature({ required: false }));
 app.use((req, res, next) => {
   console.log(`[${req.method}] ${req.originalUrl.split('?')[0]}`);
   next();
