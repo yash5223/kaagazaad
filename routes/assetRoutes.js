@@ -159,7 +159,7 @@ router.get(
     let expiredCount = 0;
     const rightNow = new Date();
     userAssets.forEach(asset => {
-      totalValue += asset.valueAmount || 0;
+      totalValue += Number(asset.valueAmount) || 0;
       if (asset.category === 'Property') {
         activeCount++;
       } else if (asset.expiryDate) {

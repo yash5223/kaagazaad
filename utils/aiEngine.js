@@ -113,22 +113,22 @@ function generateReply(message, assets) {
     case 'warranty_expiring': {
       const windowDays = extractWindowDays(message);
       const upcoming = assets
-        .filter(a => a.warrantyExpiry)
-        .map(a => ({ a, days: daysBetween(now, new Date(a.warrantyExpiry)) }))
+        .filter(a => a.expiryDate)
+        .map(a => ({ a, days: daysBetween(now, new Date(a.expiryDate)) }))
         .filter(x => x.days >= 0 && x.days <= windowDays)
         .sort((x, y) => x.days - y.days);
       if (upcoming.length === 0) {
         return `No warranties are expiring within the next ${windowDays} days. ✅`;
       }
-      const lines = upcoming.map(x => `• ${x.a.name} — expires ${formatDate(x.a.warrantyExpiry)} (in ${x.days} day${x.days === 1 ? '' : 's'})`).join('\n');
+      const lines = upcoming.map(x => `• ${x.a.name} — expires ${formatDate(x.a.expiryDate)} (in ${x.days} day${x.days === 1 ? '' : 's'})`).join('\n');
       return `${upcoming.length} warrant${upcoming.length === 1 ? 'y is' : 'ies are'} expiring within ${windowDays} days:\n${lines}`;
     }
     case 'warranty_expired': {
       const expired = assets
-        .filter(a => a.warrantyExpiry && new Date(a.warrantyExpiry) < now)
-        .sort((a, b) => new Date(b.warrantyExpiry) - new Date(a.warrantyExpiry));
+        .filter(a => a.expiryDate && new Date(a.expiryDate) < now)
+        .sort((a, b) => new Date(b.expiryDate) - new Date(a.expiryDate));
       if (expired.length === 0) return "None of your asset warranties have expired. 🎉";
-      const lines = expired.map(a => `• ${a.name} — expired ${formatDate(a.warrantyExpiry)}`).join('\n');
+      const lines = expired.map(a => `• ${a.name} — expired ${formatDate(a.expiryDate)}`).join('\n');
       return `${expired.length} warrant${expired.length === 1 ? 'y has' : 'ies have'} expired:\n${lines}`;
     }
     case 'price_above': {
@@ -159,12 +159,12 @@ function generateReply(message, assets) {
       if (matches.length === 0) return "I couldn't find that asset in your vault. Could you check the name?";
       if (matches.length === 1) {
         const a = matches[0];
-        return a.purchaseOrRegDate ? `You bought/registered ${a.name} on ${formatDate(a.purchaseOrRegDate)}.` : `I don't have a purchase date recorded for ${a.name}.`;
+        return a.issueDate ? `You bought/registered ${a.name} on ${formatDate(a.issueDate)}.` : `I don't have a purchase date recorded for ${a.name}.`;
       }
-      return `Found a few matches:\n` + listAssetLines(matches, a => `• ${a.name} — ${a.purchaseOrRegDate ? formatDate(a.purchaseOrRegDate) : 'no date on file'}`);
+      return `Found a few matches:\n` + listAssetLines(matches, a => `• ${a.name} — ${a.issueDate ? formatDate(a.issueDate) : 'no date on file'}`);
     }
     case 'total_value': {
-      const total = assets.reduce((sum, a) => sum + (a.valueAmount || 0), 0);
+      const total = assets.reduce((sum, a) => sum + (Number(a.valueAmount) || 0), 0);
       return `Your ${assets.length} asset${assets.length === 1 ? '' : 's'} are together worth ${formatINR(total)}.`;
     }
     case 'count_assets': {
@@ -184,14 +184,14 @@ function generateReply(message, assets) {
       return `Your least expensive recorded asset is ${bottom.name} at ${formatINR(bottom.valueAmount || 0)}.`;
     }
     case 'oldest_asset': {
-      const withDate = assets.filter(a => a.purchaseOrRegDate);
+      const withDate = assets.filter(a => a.issueDate);
       if (withDate.length === 0) return "None of your assets have a purchase date recorded.";
-      const oldest = [...withDate].sort((a, b) => new Date(a.purchaseOrRegDate) - new Date(b.purchaseOrRegDate))[0];
-      return `Your oldest recorded asset is ${oldest.name}, purchased on ${formatDate(oldest.purchaseOrRegDate)}.`;
+      const oldest = [...withDate].sort((a, b) => new Date(a.issueDate) - new Date(b.issueDate))[0];
+      return `Your oldest recorded asset is ${oldest.name}, purchased on ${formatDate(oldest.issueDate)}.`;
     }
     case 'newest_asset': {
       const newest = [...assets].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
-      return `Your most recently added asset is ${newest.name}${newest.purchaseOrRegDate ? `, purchased on ${formatDate(newest.purchaseOrRegDate)}` : ''}.`;
+      return `Your most recently added asset is ${newest.name}${newest.issueDate ? `, purchased on ${formatDate(newest.issueDate)}` : ''}.`;
     }
     case 'service_history': {
       const phrase = extractSearchPhrase(message);
@@ -213,7 +213,7 @@ function generateReply(message, assets) {
       assets.forEach(a => {
         byCategory[a.category] = byCategory[a.category] || { count: 0, value: 0 };
         byCategory[a.category].count += 1;
-        byCategory[a.category].value += a.valueAmount || 0;
+        byCategory[a.category].value += Number(a.valueAmount) || 0;
       });
       return Object.entries(byCategory).map(([cat, d]) => `• ${cat}: ${d.count} item${d.count === 1 ? '' : 's'}, ${formatINR(d.value)}`).join('\n');
     }
@@ -249,19 +249,19 @@ function generateAssetSummary(asset) {
   if (brand) overview += ` from ${brand}`;
   if (category) overview += ` is registered under your ${category}${asset.subCategory ? ` / ${asset.subCategory}` : ''} vault`;
   else overview += ' is stored in your vault';
-  if (asset.purchaseOrRegDate) overview += `, purchased${seller ? ` from ${seller}` : ''} on ${formatDate(asset.purchaseOrRegDate)}`;
+  if (asset.issueDate) overview += `, purchased${seller ? ` from ${seller}` : ''} on ${formatDate(asset.issueDate)}`;
   else if (seller) overview += `, purchased from ${seller}`;
   overview += '.';
   sentences.push(overview);
   if (asset.valueAmount) {
-    sentences.push(`It was valued at ${formatINR(asset.valueAmount)}${asset.invoiceOrDeedNumber && asset.invoiceOrDeedNumber !== '-' ? `, recorded under invoice/deed number ${asset.invoiceOrDeedNumber}` : ''}.`);
+    sentences.push(`It was valued at ${formatINR(asset.valueAmount)}${asset.invoiceNumber && asset.invoiceNumber !== '-' ? `, recorded under invoice/deed number ${asset.invoiceNumber}` : ''}.`);
   }
-  if (asset.warrantyExpiry) {
-    const days = daysBetween(new Date(), new Date(asset.warrantyExpiry));
+  if (asset.expiryDate) {
+    const days = daysBetween(new Date(), new Date(asset.expiryDate));
     if (days >= 0) {
-      sentences.push(`Its warranty is currently active and valid until ${formatDate(asset.warrantyExpiry)}${days <= 60 ? ` (expiring in ${days} day${days === 1 ? '' : 's'})` : ''}.`);
+      sentences.push(`Its warranty is currently active and valid until ${formatDate(asset.expiryDate)}${days <= 60 ? ` (expiring in ${days} day${days === 1 ? '' : 's'})` : ''}.`);
     } else {
-      sentences.push(`Its warranty expired on ${formatDate(asset.warrantyExpiry)}, ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago.`);
+      sentences.push(`Its warranty expired on ${formatDate(asset.expiryDate)}, ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago.`);
     }
   }
   const records = asset.serviceRecords || [];
