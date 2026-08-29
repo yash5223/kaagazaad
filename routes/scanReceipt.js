@@ -14,9 +14,9 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 // Accepted for OCR scanning: common photo formats (incl. HEIC/HEIF from iPhones and
-// WEBP) plus PDF, since a large share of receipts/policies/tickets now arrive as
-// emailed or downloaded PDFs rather than photos.
-const RECEIPT_ALLOWED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf']);
+// WEBP) plus PDF, DOC/DOCX and XLS/XLSX, since a large share of receipts/policies/
+// tickets now arrive as emailed or downloaded documents/spreadsheets rather than photos.
+const RECEIPT_ALLOWED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'doc', 'docx', 'xls', 'xlsx']);
 const RECEIPT_ALLOWED_MIMES = new Set([
   'image/jpeg',
   'image/png',
@@ -24,7 +24,14 @@ const RECEIPT_ALLOWED_MIMES = new Set([
   'image/heic',
   'image/heif',
   'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+  'application/x-cfb', // legacy OLE container shared by .doc and .xls
 ]);
+// Legacy OLE-based Office files (.doc / .xls) all sniff as the same generic
+// "application/x-cfb" compound-file mime, so the claimed extension is what tells them
+// apart once we already know the container format is genuine.
+const CFB_EXTENSIONS = new Set(['doc', 'xls']);
 // Max pages to rasterize + OCR for a scanned (image-only) PDF. Receipts/certificates
 // rarely run past a couple of pages, and capping this keeps a single scan fast.
 const MAX_PDF_PAGES_FOR_OCR = 3;
@@ -38,7 +45,7 @@ const upload = multer({
   fileFilter(req, file, cb) {
     const ext = path.extname(file.originalname || '').replace('.', '').toLowerCase();
     if (!RECEIPT_ALLOWED_EXTENSIONS.has(ext)) {
-      return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'Only JPG, PNG, WEBP, HEIC/HEIF images or PDF files are accepted for scanning.'));
+      return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'Only JPG, PNG, WEBP, HEIC/HEIF images, PDF, DOC/DOCX or XLS/XLSX files are accepted for scanning.'));
     }
     return cb(null, true);
   },
@@ -47,13 +54,19 @@ const upload = multer({
 async function verifyReceiptImage(req, res, next) {
   if (!req.file) return next();
   try {
+    const claimedExt = path.extname(req.file.originalname || '').replace('.', '').toLowerCase();
     const detected = await fileTypeFromFile(req.file.path);
     const mime = detected && detected.mime;
     if (!mime || !RECEIPT_ALLOWED_MIMES.has(mime)) {
       fs.unlink(req.file.path, () => {});
-      return res.status(400).json({ error: 'The uploaded file is not a supported image or PDF.' });
+      return res.status(400).json({ error: 'The uploaded file is not a supported image, PDF, DOC/DOCX or XLS/XLSX file.' });
+    }
+    if (mime === 'application/x-cfb' && !CFB_EXTENSIONS.has(claimedExt)) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: 'This file looks like a legacy Office document but its extension does not match its contents.' });
     }
     req.file.detectedMime = mime;
+    req.file.detectedExt = mime === 'application/x-cfb' ? claimedExt : (detected.ext || claimedExt);
     return next();
   } catch (err) {
     fs.unlink(req.file.path, () => {});
@@ -257,6 +270,31 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
       } finally {
         if (parser) await parser.destroy();
       }
+    } else if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      // .docx has a text layer just like a digital PDF — read it directly, no OCR needed.
+      const mammoth = require('mammoth');
+      const { value: docxText } = await mammoth.extractRawText({ path: req.file.path });
+      rawText = (docxText || '').trim();
+      ocrConfidence = rawText ? 100 : 0;
+    } else if (req.file.detectedExt === 'doc') {
+      // Legacy binary .doc — mammoth only understands the modern .docx XML format,
+      // so pull the body text out of the OLE container with word-extractor instead.
+      const WordExtractor = require('word-extractor');
+      const extractor = new WordExtractor();
+      const extracted = await extractor.extract(req.file.path);
+      rawText = (extracted.getBody() || '').trim();
+      ocrConfidence = rawText ? 100 : 0;
+    } else if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || req.file.detectedExt === 'xls') {
+      // SheetJS reads both modern .xlsx and legacy .xls workbooks. Flatten every sheet
+      // to CSV-ish text so the same regex/LLM extraction used for receipts still works.
+      const XLSX = require('xlsx');
+      const workbook = XLSX.readFile(req.file.path);
+      const sheetTexts = workbook.SheetNames.map((sheetName) => {
+        const sheet = workbook.Sheets[sheetName];
+        return XLSX.utils.sheet_to_csv(sheet, { blankrows: false });
+      });
+      rawText = sheetTexts.join('\n\n').trim();
+      ocrConfidence = rawText ? 100 : 0;
     } else {
       let sourcePath = req.file.path;
       if (mime === 'image/heic' || mime === 'image/heif') {
