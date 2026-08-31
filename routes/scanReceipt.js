@@ -200,6 +200,86 @@ function classifyDocument(text) {
   return { category: best.category, subCategory: best.subCategory, documentType: best.documentType };
 }
 
+// Mirrors the category → subCategory → documentType hierarchy in the Flutter
+// upload screen (_categoryHierarchy). Used only to resolve the user-typed
+// "what are you uploading?" hint (documentTypeHint) to a concrete
+// classification. classifyDocument() above (OCR-text signal scoring) is
+// still used whenever no hint is given or the hint doesn't match anything
+// specific enough — this is a shortcut for the categories/subcategories that
+// have no signal-based detector at all (Identity & Legal, Financial,
+// Healthcare, Employment, Business, Corporate, Legal, ...).
+const HINT_HIERARCHY = {
+  Personal: {
+    'Identity & Legal': ['Aadhaar Card', 'PAN Card', 'Passport', 'Driving Licence', 'Voter ID', 'Birth Certificate', 'Marriage Certificate', 'Name Change Affidavit'],
+    Financial: ['Bank Account Documents', 'Fixed Deposits (FDs)', 'Mutual Funds (MF)', 'IT Returns', 'Form 16', 'Loan Documents'],
+    Insurance: ['Health Insurance', 'Life Insurance', 'Vehicle Insurance', 'Home Insurance', 'Travel Insurance'],
+    Healthcare: ['Medical Reports', 'Prescriptions', 'Vaccinations', 'Blood Group Information'],
+    Property: ['Purchase Documents', 'Sale Deed', 'Lease Agreement', 'Property Tax'],
+    Vehicle: ['RC Book', 'PUC', 'Service History', 'Purchase Warranty', 'Road Tax'],
+    'Gadgets/Appliances': ['Refrigerator', 'Washing Machine', 'Laptop', 'Robo Cleaner', 'User Manual', 'AMC', 'Service Record'],
+    Jewellery: ['Hallmark Certificate', 'Valuation Certificate'],
+    Travel: ['Flight Ticket', 'Hotel Booking', 'Visa', 'Foreign Exchange Records'],
+  },
+  Professional: {
+    Employment: ['Appointment Letter', 'Offer Letter', 'Experience Certificate', 'Relieving Letter', 'Salary Slip', 'Promotion Letters', 'Appraisal'],
+    Certification: ['AI Course', 'Degree', 'Memberships'],
+    'IP (Intellectual Property)': ['Patent Application', 'Granted Patent', 'Trademark', 'Copyright'],
+    Business: ['GST Documents', 'Company Registration', 'MSME', 'TAN', 'Licenses'],
+    'Awards & Recognition': ['Awards', 'Recognition Documents'],
+  },
+  Corporate: {
+    'Company Formation & Registration': ['Certificate of Incorporation', 'MOA', 'AOA', 'Registration Documents'],
+    'Board & Shareholder Documents': ['Board Resolutions', 'Shareholder Resolutions', 'Meeting Minutes', 'Share Certificates'],
+    'Corporate Governance & Compliance': ['Compliance Documents', 'Corporate Policies', 'Annual Filings', 'Statutory Registers'],
+    'Contracts & Commercial': ['Client Contracts', 'Vendor Agreements', 'Service Agreements', 'Purchase Agreements'],
+    'Finance & Tax': ['GST Documents', 'Tax Documents', 'Audited Financial Statements'],
+    'Intellectual Property': ['Trademark Documents', 'Copyright Documents', 'Patent Documents', 'IP Assignment Agreements'],
+  },
+  Legal: {
+    'Client Management': ['Client Profiles', 'Identity Proof', 'Engagement Letters'],
+    'Court Documents': ['Evidence', 'Orders', 'Affidavits', 'Petitions'],
+    Agreements: ['NDA', 'Partnership', 'Proprietorship', 'MOUs'],
+    Patents: ['Patent Documents'],
+    'Corporate Legal': ['Corporate Legal Documents'],
+    'Litigation Calendar': ['Litigation-related Calendar Documents'],
+  },
+};
+
+function normalizeHintText(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Flattened once at module load: [{ category, subCategory, documentType, normalized }]
+const HINT_ENTRIES = [];
+for (const [category, subCats] of Object.entries(HINT_HIERARCHY)) {
+  for (const [subCategory, items] of Object.entries(subCats)) {
+    for (const documentType of items) {
+      HINT_ENTRIES.push({ category, subCategory, documentType, normalized: normalizeHintText(documentType) });
+    }
+  }
+}
+
+// Resolves a free-text hint like "aadhaar card" or "health insurance policy"
+// to a concrete category/subCategory/documentType by matching it against the
+// known document-type names above. Picks the longest matching name so e.g.
+// "life insurance policy" prefers "Life Insurance" over a shorter partial
+// match. Returns null (falls back to OCR-text classification) if nothing
+// matches closely enough — very short fragments are ignored to avoid false
+// positives.
+function classifyFromHint(hint) {
+  const normalizedHint = normalizeHintText(hint);
+  if (normalizedHint.length < 3) return null;
+  let best = null;
+  for (const entry of HINT_ENTRIES) {
+    if (entry.normalized.length < 3) continue;
+    const matches = normalizedHint.includes(entry.normalized) || entry.normalized.includes(normalizedHint);
+    if (!matches) continue;
+    if (!best || entry.normalized.length > best.normalized.length) best = entry;
+  }
+  if (!best) return null;
+  return { category: best.category, subCategory: best.subCategory, documentType: best.documentType };
+}
+
 // University-agnostic on purpose: every pattern below matches generic
 // certificate/marksheet wording ("This is to certify that ...", "degree of
 // ...", "Seat No.", "CGPA") rather than any specific university's name or
@@ -468,9 +548,16 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     const cleanedText = cleanOcrText(rawText);
 
     // 1. Classify once: which category/subCategory/documentType is this?
-    // Works across every category (not just personal receipts), including
-    // university-agnostic degree certificates and marksheets.
-    const classification = classifyDocument(cleanedText);
+    // If the user told us what they're uploading (documentTypeHint, from the
+    // "what are you uploading?" prompt before file selection), trust that
+    // over statistical text scoring — it also covers categories that have no
+    // OCR-signal detector at all (Identity & Legal, Financial, Healthcare,
+    // Employment, Business, Corporate, Legal, ...). Otherwise fall back to
+    // classifyDocument()'s signal scoring, which still works across every
+    // category it does support, including university-agnostic degree
+    // certificates and marksheets.
+    const documentTypeHint = typeof req.body.documentTypeHint === 'string' ? req.body.documentTypeHint.trim() : '';
+    const classification = classifyFromHint(documentTypeHint) || classifyDocument(cleanedText);
 
     // 2. Run the extractor suited to that classification.
     const ASSET_SUBCATEGORIES = new Set(['Vehicle', 'Jewellery', 'Property', 'Insurance', 'Gadgets/Appliances', 'Gadgets & Appliances']);
