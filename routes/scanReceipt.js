@@ -333,6 +333,104 @@ function parseEducationCertificate(documentType, text) {
   };
 }
 
+// Aadhaar/PAN cards print "Name" / "JOHN DOE" / "Male" / "1234 5678 9012" as
+// bare lines with no "Label: Value" pairing at all, so parseGenericLabelValues
+// below (and the LLM fallback, when no LLM backend is reachable) both come up
+// empty for them. These two dedicated parsers cover India's two most common
+// ID cards with plain regex/line heuristics — no LLM required. Keys are
+// computed with keyFromLabel() from the exact labels registered for
+// 'Identity & Legal|Aadhaar Card' / 'Identity & Legal|PAN Card' in
+// config/fieldLabels.js (kept in sync with Flutter's _documentFieldLabels).
+const AADHAAR_NUMBER_RE = /\b(\d{4}\s?\d{4}\s?\d{4})\b/;
+const PAN_NUMBER_RE = /\b([A-Z]{5}[0-9]{4}[A-Z])\b/;
+const VID_RE = /\bVID\b\s*[:.]?\s*(\d{4}\s?\d{4}\s?\d{4}\s?\d{4})/i;
+const GENDER_RE = /\b(male|female|transgender)\b/i;
+const AADHAAR_DOB_RE = /(?:DOB|Date of Birth|D\.?O\.?B\.?|Year of Birth|YOB)\s*[:.]?\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4})/i;
+const ENROLMENT_ID_RE = /(?:Enrol(?:l)?ment|Update)\s*(?:No\.?|ID)?\s*[:.]?\s*([\d/]{10,})/i;
+const HEADER_LINE_RE = /government of india|unique identification|आधार|भारत सरकार|your aadhaar|income tax department|govt\.? of india|permanent account number/i;
+
+function parseAadhaar(text) {
+  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const aadhaarNumber = extract(AADHAAR_NUMBER_RE, text).replace(/\s+/g, ' ');
+  const vid = extract(VID_RE, text).replace(/\s+/g, ' ');
+  const genderRaw = extract(GENDER_RE, text);
+  const gender = genderRaw ? genderRaw[0].toUpperCase() + genderRaw.slice(1).toLowerCase() : '';
+  const dobRaw = extract(AADHAAR_DOB_RE, text);
+  const dob = normalizeDate(dobRaw) || dobRaw;
+  // Name: the line just above the Male/Female line is almost always the
+  // cardholder's name on an Aadhaar card — walk back a few lines skipping
+  // generic headers/pure-number lines to find it.
+  let fullName = '';
+  const genderIdx = lines.findIndex((l) => GENDER_RE.test(l));
+  if (genderIdx > 0) {
+    for (let i = genderIdx - 1; i >= 0 && i >= genderIdx - 3; i--) {
+      const l = lines[i];
+      if (!l || HEADER_LINE_RE.test(l) || /^\d+$/.test(l)) continue;
+      fullName = l;
+      break;
+    }
+  }
+  // Address: Aadhaar prints a multi-line address block ending in a 6-digit
+  // PIN code, usually below the Aadhaar number/photo.
+  const addressMatch = text.match(/((?:[A-Za-z0-9,./\- ]+\n){0,6}[A-Za-z ]+[-,\s]\d{6})/);
+  const address = addressMatch ? addressMatch[1].replace(/\n+/g, ', ').replace(/\s{2,}/g, ' ').trim() : '';
+  const enrolmentId = extract(ENROLMENT_ID_RE, text);
+  return {
+    fullName,
+    aadhaarNumber,
+    dateOfBirthYearOfBirth: dob || '',
+    gender,
+    address,
+    vid,
+    enrolmentUpdateId: enrolmentId,
+    // Legacy/common fields other parts of the app (e.g. documentFieldTemplates.js
+    // dynamic fields) still key off.
+    name: fullName,
+    documentNumber: aadhaarNumber,
+    issuingAuthority: 'UIDAI',
+  };
+}
+
+function parsePan(text) {
+  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const panNumber = extract(PAN_NUMBER_RE, text);
+  const dobRaw = extract(/(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{4})/, text);
+  const dob = normalizeDate(dobRaw) || dobRaw;
+  let fullName = '';
+  let fatherName = '';
+  const nameLabelIdx = lines.findIndex((l) => /^name$/i.test(l));
+  if (nameLabelIdx >= 0 && lines[nameLabelIdx + 1]) fullName = lines[nameLabelIdx + 1];
+  const fatherLabelIdx = lines.findIndex((l) => /father|mother/i.test(l) && l.length < 40);
+  if (fatherLabelIdx >= 0 && lines[fatherLabelIdx + 1]) fatherName = lines[fatherLabelIdx + 1];
+  if (!fullName) {
+    // Fallback: first all-caps line (2+ words) that isn't the card's header text.
+    const capsLine = lines.find((l) => /^[A-Z][A-Z .'-]{4,40}$/.test(l) && !HEADER_LINE_RE.test(l));
+    fullName = capsLine || '';
+  }
+  return {
+    fullName,
+    "fatherSMotherSName": fatherName,
+    panNumber,
+    dateOfBirth: dob || '',
+    dateOfIssue: '',
+    // Legacy/common fields.
+    name: fullName,
+    documentNumber: panNumber,
+    issuingAuthority: 'Income Tax Department',
+  };
+}
+
+// Dispatches to the right dedicated Identity & Legal parser by documentType.
+// Document types with no dedicated parser yet (Passport, Driving Licence,
+// Voter ID, Birth/Marriage Certificate, ...) fall through to an empty object
+// here and still rely on parseGenericLabelValues() + the Ollama LLM fallback.
+function parseIdentityDocument(documentType, text) {
+  const dt = String(documentType || '').toLowerCase();
+  if (dt.includes('aadhaar')) return parseAadhaar(text);
+  if (dt.includes('pan card') || dt === 'pan') return parsePan(text);
+  return {};
+}
+
 // Generic "Label: Value" / "Label - Value" line scanner. Not tied to any
 // particular document type — it's the safety net that lets fields populate
 // for the long tail of document varieties (employment letters, business
@@ -566,6 +664,8 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
       specific = parseEducationCertificate(classification.documentType, cleanedText);
     } else if (ASSET_SUBCATEGORIES.has(classification.subCategory)) {
       specific = parseInvoice(cleanedText, classification);
+    } else if (classification.subCategory === 'Identity & Legal') {
+      specific = { ...classification, ...parseIdentityDocument(classification.documentType, cleanedText) };
     } else {
       specific = { ...classification };
     }
