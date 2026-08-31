@@ -349,6 +349,18 @@ const AADHAAR_DOB_RE = /(?:DOB|Date of Birth|D\.?O\.?B\.?|Year of Birth|YOB)\s*[
 const ENROLMENT_ID_RE = /(?:Enrol(?:l)?ment|Update)\s*(?:No\.?|ID)?\s*[:.]?\s*([\d/]{10,})/i;
 const HEADER_LINE_RE = /government of india|unique identification|आधार|भारत सरकार|your aadhaar|income tax department|govt\.? of india|permanent account number/i;
 
+// OCR noise lines (stray watermark fragments, misread Hindi glyphs, page
+// artifacts) commonly show up as short garbage like "a]" or "> 41" sitting
+// right next to real fields. A name candidate line has to actually look like
+// a name — letters/spaces/apostrophes/hyphens only, at least 3 characters —
+// or we keep looking further back instead of grabbing the first non-header
+// line we see.
+function isPlausibleNameLine(line) {
+  const trimmed = String(line || '').trim();
+  if (trimmed.length < 3) return false;
+  return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)*$/.test(trimmed);
+}
+
 function parseAadhaar(text) {
   const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const aadhaarNumber = extract(AADHAAR_NUMBER_RE, text).replace(/\s+/g, ' ');
@@ -357,15 +369,20 @@ function parseAadhaar(text) {
   const gender = genderRaw ? genderRaw[0].toUpperCase() + genderRaw.slice(1).toLowerCase() : '';
   const dobRaw = extract(AADHAAR_DOB_RE, text);
   const dob = normalizeDate(dobRaw) || dobRaw;
-  // Name: the line just above the Male/Female line is almost always the
-  // cardholder's name on an Aadhaar card — walk back a few lines skipping
-  // generic headers/pure-number lines to find it.
+  // Name: almost always sits somewhere in the few lines above the Male/
+  // Female line on an Aadhaar card, but OCR noise lines often sit between
+  // them — walk back a wider window, skipping headers/digits/the "Aadhaar"
+  // label/gender-lookalikes, and only accept a line that actually looks
+  // like a name rather than stopping at the first non-header line.
   let fullName = '';
   const genderIdx = lines.findIndex((l) => GENDER_RE.test(l));
   if (genderIdx > 0) {
-    for (let i = genderIdx - 1; i >= 0 && i >= genderIdx - 3; i--) {
+    for (let i = genderIdx - 1; i >= 0 && i >= genderIdx - 6; i--) {
       const l = lines[i];
-      if (!l || HEADER_LINE_RE.test(l) || /^\d+$/.test(l)) continue;
+      if (!l) continue;
+      if (HEADER_LINE_RE.test(l) || /^aadhaar$/i.test(l)) continue;
+      if (/^\d+$/.test(l) || GENDER_RE.test(l)) continue;
+      if (!isPlausibleNameLine(l)) continue;
       fullName = l;
       break;
     }
