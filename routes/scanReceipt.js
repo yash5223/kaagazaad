@@ -7,6 +7,7 @@ const { fileTypeFromFile } = require('file-type');
 const router = express.Router();
 const authMiddleware = require('../middleware/authMiddleware');
 const { asyncHandler } = require('../middleware/errorHandler');
+const { getFieldSpecs, keyFromLabel } = require('../config/fieldLabels');
 
 const uploadDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -121,34 +122,159 @@ function cleanOcrText(text) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
-function detectCategoryAndType(text) {
-  if (/\b(car|motorcycle|suv|sedan|mileage|vin|registration number|chassis|puc\b)\b/i.test(text)) {
-    const isPuc = /\bpuc\b/i.test(text);
-    return { category: 'Personal', subCategory: 'Vehicle', documentType: isPuc ? 'PUC Certificate' : 'RC Book' };
-  }
-  if (/\b(gold|diamond|carat|purity|jewel+ery|necklace|\bring\b|silver|hallmark)\b/i.test(text)) {
-    const isHallmark = /hallmark/i.test(text);
-    return { category: 'Personal', subCategory: 'Jewellery', documentType: isHallmark ? 'Hallmark Certificate' : 'Purchase Invoice' };
-  }
-  if (/\b(flat|apartment|villa|plot|khata|\brera\b|sale deed|built[- ]?up area)\b/i.test(text)) {
-    const isDeed = /sale deed/i.test(text);
-    return { category: 'Personal', subCategory: 'Property', documentType: isDeed ? 'Sale Deeds' : 'Purchase Documents' };
-  }
-  if (/\b(policy|insurer|sum insured|sum assured|premium)\b/i.test(text)) {
-    let documentType = 'Health Insurance';
-    if (/\bvehicle\b/i.test(text)) documentType = 'Vehicle Insurance';
-    else if (/\blife\b/i.test(text)) documentType = 'Life Insurance';
-    else if (/\bhome\b/i.test(text)) documentType = 'Home Insurance';
-    else if (/\btravel\b/i.test(text)) documentType = 'Travel Insurance';
-    return { category: 'Personal', subCategory: 'Insurance', documentType };
-  }
-  if (/\b(phone|smartphone|laptop|macbook|smartwatch|tablet|ipad|\btv\b|television|refrigerator|fridge|\bac\b|washer|dryer|microwave)\b/i.test(text)) {
-    return { category: 'Personal', subCategory: 'Gadgets & Appliances', documentType: 'Mobile Phone' };
-  }
-  return { category: 'Personal', subCategory: 'Gadgets & Appliances', documentType: 'Purchase Invoice' };
+// Counts how many of a set of regexes match `text`. Used to score a document
+// against several category "profiles" at once and pick the best fit, instead
+// of the old first-match-wins chain (which meant anything that wasn't a
+// vehicle/jewellery/property/insurance/gadget silently fell through to
+// "Gadgets & Appliances / Purchase Invoice" no matter what it actually was).
+function scoreSignals(text, patterns) {
+  return patterns.reduce((sum, p) => sum + (p.test(text) ? 1 : 0), 0);
 }
-function parseInvoice(text) {
-  const { category, subCategory, documentType } = detectCategoryAndType(text);
+
+// Deliberately contains no university name, board name, or institute name —
+// these signals are generic wording every degree certificate / marksheet /
+// provisional certificate uses regardless of which university issued it
+// (SPPU, any other Indian university, or a foreign one), so classification
+// doesn't need to be taught each new university by name.
+const EDUCATION_SIGNALS = [
+  /\bthis is to certify that\b/i,
+  /\bhas been awarded\b/i,
+  /\bhas successfully completed\b/i,
+  /\bhas passed\b/i,
+  /\bdegree of\b/i,
+  /\bbachelor of\b/i,
+  /\bmaster of\b/i,
+  /\bdiploma in\b/i,
+  /\buniversity\b/i,
+  /\bvidyapeeth\b/i,
+  /\binstitute of technology\b/i,
+  /\bconvocation\b/i,
+  /\b(cgpa|sgpa)\b/i,
+  /\bsemester\b/i,
+  /\bgrade card\b/i,
+  /\bmark ?sheet\b/i,
+  /\btranscript\b/i,
+  /\bstatement of marks\b/i,
+  /\bseat no\.?\b/i,
+  /\bprn\b/i,
+  /\benrol(l)?ment no\.?\b/i,
+];
+const VEHICLE_SIGNALS = [/\bcar\b/i, /\bmotorcycle\b/i, /\bsuv\b/i, /\bsedan\b/i, /\bmileage\b/i, /\bvin\b/i, /\bregistration number\b/i, /\bchassis\b/i, /\bpuc\b/i];
+const JEWELLERY_SIGNALS = [/\bgold\b/i, /\bdiamond\b/i, /\bcarat\b/i, /\bpurity\b/i, /\bjewel+ery\b/i, /\bnecklace\b/i, /\bring\b/i, /\bsilver\b/i, /\bhallmark\b/i];
+const PROPERTY_SIGNALS = [/\bflat\b/i, /\bapartment\b/i, /\bvilla\b/i, /\bplot\b/i, /\bkhata\b/i, /\brera\b/i, /\bsale deed\b/i, /\bbuilt[- ]?up area\b/i];
+const INSURANCE_SIGNALS = [/\bpolicy\b/i, /\binsurer\b/i, /\bsum insured\b/i, /\bsum assured\b/i, /\bpremium\b/i];
+const GADGET_SIGNALS = [/\bphone\b/i, /\bsmartphone\b/i, /\blaptop\b/i, /\bmacbook\b/i, /\bsmartwatch\b/i, /\btablet\b/i, /\bipad\b/i, /\btv\b/i, /\btelevision\b/i, /\brefrigerator\b/i, /\bfridge\b/i, /\bac\b/i, /\bwasher\b/i, /\bdryer\b/i, /\bmicrowave\b/i];
+
+// Classifies text against every known category profile and returns the best
+// match, so a document that isn't a receipt (a degree certificate, a
+// marksheet, an offer letter, ...) no longer gets forced into "Gadgets &
+// Appliances". Ties/no-signal cases fall back to the old default so existing
+// receipt-scanning behaviour for personal assets is unchanged.
+function classifyDocument(text) {
+  const candidates = [
+    { score: scoreSignals(text, EDUCATION_SIGNALS), category: 'Professional', subCategory: 'Certification', documentType: 'Degree' },
+    { score: scoreSignals(text, VEHICLE_SIGNALS), category: 'Personal', subCategory: 'Vehicle', documentType: /\bpuc\b/i.test(text) ? 'PUC' : 'RC Book' },
+    { score: scoreSignals(text, JEWELLERY_SIGNALS), category: 'Personal', subCategory: 'Jewellery', documentType: /hallmark/i.test(text) ? 'Hallmark Certificate' : 'Purchase Invoice' },
+    { score: scoreSignals(text, PROPERTY_SIGNALS), category: 'Personal', subCategory: 'Property', documentType: /sale deed/i.test(text) ? 'Sale Deed' : 'Purchase Documents' },
+    { score: scoreSignals(text, INSURANCE_SIGNALS), category: 'Personal', subCategory: 'Insurance', documentType: (() => {
+        if (/\bvehicle\b/i.test(text)) return 'Vehicle Insurance';
+        if (/\blife\b/i.test(text)) return 'Life Insurance';
+        if (/\bhome\b/i.test(text)) return 'Home Insurance';
+        if (/\btravel\b/i.test(text)) return 'Travel Insurance';
+        return 'Health Insurance';
+      })() },
+    { score: scoreSignals(text, GADGET_SIGNALS), category: 'Personal', subCategory: 'Gadgets/Appliances', documentType: 'Purchase Invoice' },
+  ];
+  // Education needs at least 2 independent signals before it wins — a single
+  // stray word (e.g. "semester" in an unrelated sentence) shouldn't be enough
+  // to reclassify a receipt as a degree certificate.
+  const education = candidates[0];
+  if (education.score < 2) education.score = 0;
+  let best = candidates[0];
+  for (const c of candidates) {
+    if (c.score > best.score) best = c;
+  }
+  if (best.score === 0) {
+    return { category: 'Personal', subCategory: 'Gadgets/Appliances', documentType: 'Purchase Invoice' };
+  }
+  return { category: best.category, subCategory: best.subCategory, documentType: best.documentType };
+}
+
+// University-agnostic on purpose: every pattern below matches generic
+// certificate/marksheet wording ("This is to certify that ...", "degree of
+// ...", "Seat No.", "CGPA") rather than any specific university's name or
+// layout, so the same function extracts an SPPU degree certificate, a
+// certificate from any other Indian university, or a foreign one, without
+// changes. `documentType` is passed through so a detected marksheet still
+// reports itself as such even though it shares the "Degree" field template.
+function parseEducationCertificate(documentType, text) {
+  const isMarksheet = /\b(mark ?sheet|grade card|statement of marks|transcript)\b/i.test(text);
+  // [^\S\r\n] (horizontal whitespace only) keeps the name match on one line —
+  // \s alone matches newlines too and would swallow the next line's label
+  // (e.g. "Seat No") into the captured name.
+  const name = extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
+    || extract(/\bname\s*[: ][^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text);
+  const universityLine = extract(/^.*\b(?:university|vidyapeeth|institute of technology|board of [a-z ]+ education)\b.*$/im, text);
+  const degreeName = extract(/\b((?:bachelor|master) of [A-Za-z .&()]+|diploma in [A-Za-z .&()]+|b\.?\s?e\.?|b\.?\s?tech\.?|m\.?\s?e\.?|m\.?\s?tech\.?|b\.?\s?sc\.?|m\.?\s?sc\.?|b\.?\s?com\.?|m\.?\s?com\.?|ph\.?\s?d\.?)\b/i, text);
+  const branch = extract(/\(([A-Za-z &,.]{3,60})\)/, text)
+    || extract(/(?:branch|specialization|stream)\s*(?:of|in)?\s*[: ]\s*([A-Za-z &]+)/i, text);
+  const seatNumber = extract(/(?:seat\s*no\.?|exam\s*seat\s*no\.?|roll\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const enrollmentNumber = extract(/(?:enrol{1,2}ment\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text) || extract(/\bprn\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const certificateNumber = extract(/certificate\s*no\.?\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const classOrGrade = extract(/\b(first class with distinction|first class|higher second class|second class|pass class|distinction|honou?rs)\b/i, text);
+  const cgpa = extract(/\b[cs]gpa\s*[: ]\s*([\d.]{1,5})/i, text);
+  const percentage = extract(/\b(\d{1,3}(?:\.\d+)?)\s*%/, text);
+  const dateOfIssue = normalizeDate(extract(/(?:dated|date of issue|convocation date|issued on)\s*[: ]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text));
+  const yearOfPassing = extract(/\b(?:19|20)\d{2}\b/, text);
+  const classCgpaPercentage = classOrGrade || (cgpa ? `CGPA ${cgpa}` : '') || (percentage ? `${percentage}%` : '');
+  return {
+    // Keys computed with keyFromLabel() from the exact labels registered for
+    // 'Certification|Degree' in config/fieldLabels.js (kept in sync with
+    // Flutter's _documentFieldLabels) — these are what the upload form reads.
+    studentFullName: name || '',
+    universityInstituteName: universityLine ? universityLine.replace(/\s{2,}/g, ' ').trim() : '',
+    degreeName: degreeName ? degreeName.trim() : '',
+    branchSpecialization: branch ? branch.trim() : '',
+    seatNumberRollNumber: seatNumber || '',
+    enrollmentNumberPrn: enrollmentNumber || '',
+    classCgpaPercentage,
+    certificateNumber: certificateNumber || '',
+    dateOfIssue: dateOfIssue || '',
+    yearOfPassing: yearOfPassing || '',
+    // Legacy/common fields kept for backward compatibility with anything
+    // still reading the older generic shape.
+    name: name || '',
+    issuingAuthority: universityLine ? universityLine.replace(/\s{2,}/g, ' ').trim() : '',
+    documentNumber: certificateNumber || enrollmentNumber || seatNumber || '',
+    date: dateOfIssue || '',
+    category: 'Professional',
+    subCategory: 'Certification',
+    documentType: isMarksheet ? 'Degree' : documentType,
+  };
+}
+
+// Generic "Label: Value" / "Label - Value" line scanner. Not tied to any
+// particular document type — it's the safety net that lets fields populate
+// for the long tail of document varieties (employment letters, business
+// registrations, award certificates, and anything else) that don't have a
+// dedicated parser, by matching whatever labels the document itself prints
+// and turning them into the same camelCase keys the Flutter form expects.
+function parseGenericLabelValues(text) {
+  const result = {};
+  const lineRe = /^([A-Za-z][A-Za-z0-9 /&().'-]{1,40}?)\s*[:\-]\s*(.{1,80})$/;
+  for (const rawLine of String(text || '').split('\n')) {
+    const match = rawLine.trim().match(lineRe);
+    if (!match) continue;
+    const label = match[1].trim();
+    const value = match[2].trim();
+    if (!label || !value) continue;
+    const key = keyFromLabel(label);
+    if (!result[key]) result[key] = value;
+  }
+  return result;
+}
+function parseInvoice(text, classification) {
+  const { category, subCategory, documentType } = classification;
   const nameMatch = extract(/(?:Description|Product|Item|Asset|Property Name)\s*[: ]\s*([A-Za-z0-9 ]+)/i, text);
   const store = extract(/(?:Store|Seller|Broker|Vendor|Agency|Dealer)\s*[: ]\s*([A-Za-z0-9 ]+)/i, text)
     || extract(/\b(Reliance Digital|Croma|Vijay Sales)\b/i, text);
@@ -340,12 +466,52 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     }
 
     const cleanedText = cleanOcrText(rawText);
-    let parsed = parseInvoice(cleanedText);
-    if (!parsed.name || !parsed.amount) {
+
+    // 1. Classify once: which category/subCategory/documentType is this?
+    // Works across every category (not just personal receipts), including
+    // university-agnostic degree certificates and marksheets.
+    const classification = classifyDocument(cleanedText);
+
+    // 2. Run the extractor suited to that classification.
+    const ASSET_SUBCATEGORIES = new Set(['Vehicle', 'Jewellery', 'Property', 'Insurance', 'Gadgets/Appliances', 'Gadgets & Appliances']);
+    let specific;
+    if (classification.subCategory === 'Certification') {
+      specific = parseEducationCertificate(classification.documentType, cleanedText);
+    } else if (ASSET_SUBCATEGORIES.has(classification.subCategory)) {
+      specific = parseInvoice(cleanedText, classification);
+    } else {
+      specific = { ...classification };
+    }
+
+    // 3. Always run the generic label:value line scanner as a safety net —
+    // it fills gaps for whatever the specific extractor above missed,
+    // without overriding anything it already found (specific wins on
+    // conflicts since it's spread second).
+    let parsed = { ...parseGenericLabelValues(cleanedText), ...specific };
+
+    // 4. Decide whether to top up with the local LLM: count meaningful
+    // (non-empty, non-classification) fields we already have. Below the
+    // threshold — or for a document type that has a known field template but
+    // regex/heuristics under-filled it — ask Ollama for exactly the fields
+    // this document type's form actually shows, so results come back keyed
+    // the same way the specific extractor's do.
+    const meaningfulCount = Object.entries(parsed).filter(([k, v]) => (
+      !['category', 'subCategory', 'documentType'].includes(k) && v !== undefined && v !== null && String(v).trim() !== ''
+    )).length;
+    if (meaningfulCount < 3) {
       try {
-        const prompt = 'Extract these fields from the receipt text below and respond with ONLY valid JSON, no explanation, no markdown fences.\n'
-          + 'Fields: name, brand (manufacturer), store (seller/vendor the item was bought from - keep this SEPARATE from brand), date (YYYY-MM-DD), amount (number only, no currency symbol), invoiceNumber, documentNumber, expiryDate (YYYY-MM-DD or empty string), notes, category (always "Personal"), subCategory (one of Property, Vehicle, "Gadgets & Appliances", Jewellery, Insurance), documentType (a specific leaf type such as "Purchase Invoice", "RC Book", "Sale Deeds"), specField1, specField2.\n'
-          + 'If a field is not found use an empty string.\n\nReceipt text:\n' + cleanedText;
+        const knownSpecs = getFieldSpecs(classification.subCategory, classification.documentType);
+        let prompt;
+        if (knownSpecs) {
+          const fieldList = knownSpecs.map((s) => `${s.key} (${s.label})`).join(', ');
+          prompt = 'Extract these fields from the document text below and respond with ONLY valid JSON, no explanation, no markdown fences.\n'
+            + `Fields (JSON key and what it means): ${fieldList}.\n`
+            + 'Dates must be formatted YYYY-MM-DD. If a field is not found use an empty string.\n\nDocument text:\n' + cleanedText;
+        } else {
+          prompt = 'Extract these fields from the receipt text below and respond with ONLY valid JSON, no explanation, no markdown fences.\n'
+            + 'Fields: name, brand (manufacturer), store (seller/vendor the item was bought from - keep this SEPARATE from brand), date (YYYY-MM-DD), amount (number only, no currency symbol), invoiceNumber, documentNumber, expiryDate (YYYY-MM-DD or empty string), notes, category (always "Personal"), subCategory (one of Property, Vehicle, "Gadgets & Appliances", Jewellery, Insurance), documentType (a specific leaf type such as "Purchase Invoice", "RC Book", "Sale Deeds"), specField1, specField2.\n'
+            + 'If a field is not found use an empty string.\n\nReceipt text:\n' + cleanedText;
+        }
         const ollamaRes = await fetch(OLLAMA_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -358,13 +524,21 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
             llmParsed.storeOrSeller = llmParsed.store;
             llmParsed.issuingAuthority = llmParsed.store;
           }
-          parsed = { ...parsed, ...llmParsed };
+          // LLM only fills what regex/heuristics left empty — never overrides
+          // an already-extracted value.
+          for (const [key, value] of Object.entries(llmParsed)) {
+            if (value === undefined || value === null || String(value).trim() === '') continue;
+            if (parsed[key] === undefined || parsed[key] === null || String(parsed[key]).trim() === '') {
+              parsed[key] = value;
+            }
+          }
           parsed.date = normalizeDate(parsed.date) || parsed.date;
           parsed.issueDate = normalizeDate(parsed.issueDate) || parsed.issueDate;
+          parsed.dateOfIssue = normalizeDate(parsed.dateOfIssue) || parsed.dateOfIssue;
           parsed.expiryDate = normalizeDate(parsed.expiryDate) || parsed.expiryDate;
         }
       } catch (llmError) {
-        console.error("Backup LLM extraction failed, returning default regex map:", llmError);
+        console.error('Backup LLM extraction failed, returning regex/heuristic map:', llmError);
       }
     }
     return res.status(200).json({ success: true, extracted: true, data: parsed, rawText: cleanedText });
