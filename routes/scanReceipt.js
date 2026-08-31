@@ -8,6 +8,8 @@ const router = express.Router();
 const authMiddleware = require('../middleware/authMiddleware');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { getFieldSpecs, keyFromLabel } = require('../config/fieldLabels');
+const OcrTemplate = require('../models/OcrTemplate');
+const { learnTemplate, applyBestTemplate } = require('../utils/ocrTemplates');
 
 const uploadDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -514,22 +516,53 @@ async function preprocessImageForOcr(inputPath, outputPath) {
 // OCRs a sequence of already-preprocessed image files with one shared Tesseract
 // worker (creating a worker per page would multiply startup cost) and concatenates
 // the recognized text, separating pages so downstream regexes still see clean lines.
+// Also collects each word's bounding box (normalized 0-1 against page width/height)
+// so a "seen this layout before" template matcher can learn where fields sit,
+// instead of only ever reasoning about flattened line order.
 async function ocrImageFiles(worker, imagePaths) {
   let combinedText = '';
   let confidenceSum = 0;
   let pagesWithText = 0;
+  const words = []; // { text, x0, y0, x1, y1 } normalized 0-1, across all pages
   for (const imagePath of imagePaths) {
-    const { data } = await worker.recognize(imagePath);
+    const { data } = await worker.recognize(imagePath, {}, { blocks: true });
     const pageText = (data.text || '').trim();
     if (pageText) {
       combinedText += (combinedText ? '\n\n' : '') + pageText;
       confidenceSum += data.confidence || 0;
       pagesWithText += 1;
     }
+    const pageWidth = (data.width || 1);
+    const pageHeight = (data.height || 1);
+    // tesseract.js v5 nests words under blocks -> paragraphs -> lines -> words;
+    // fall back to a flat data.words array for older versions.
+    const flatWords = [];
+    if (Array.isArray(data.words)) {
+      flatWords.push(...data.words);
+    } else if (Array.isArray(data.blocks)) {
+      for (const block of data.blocks) {
+        for (const para of block.paragraphs || []) {
+          for (const line of para.lines || []) {
+            for (const word of line.words || []) flatWords.push(word);
+          }
+        }
+      }
+    }
+    for (const w of flatWords) {
+      if (!w || !w.text || !w.bbox) continue;
+      words.push({
+        text: w.text,
+        x0: w.bbox.x0 / pageWidth,
+        y0: w.bbox.y0 / pageHeight,
+        x1: w.bbox.x1 / pageWidth,
+        y1: w.bbox.y1 / pageHeight,
+      });
+    }
   }
   return {
     text: combinedText,
     confidence: pagesWithText ? confidenceSum / pagesWithText : 0,
+    words,
   };
 }
 
@@ -561,6 +594,7 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     const mime = req.file.detectedMime;
     let rawText = '';
     let ocrConfidence = 0;
+    let ocrWords = [];
     const imagesToOcr = [];
 
     if (mime === 'application/pdf') {
@@ -644,6 +678,7 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
         const result = await ocrImageFiles(worker, imagesToOcr);
         rawText = result.text;
         ocrConfidence = result.confidence;
+        ocrWords = result.words || [];
       } catch (ocrErr) {
         console.error('[OCR] worker.recognize threw:', ocrErr);
         throw ocrErr;
@@ -682,7 +717,20 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     } else if (ASSET_SUBCATEGORIES.has(classification.subCategory)) {
       specific = parseInvoice(cleanedText, classification);
     } else if (classification.subCategory === 'Identity & Legal') {
-      specific = { ...classification, ...parseIdentityDocument(classification.documentType, cleanedText) };
+      // Prefer a learned layout template (built from past user corrections —
+      // see /confirm-extraction below) since it generalizes across formats
+      // without new code; fall back to the hardcoded regex parser for
+      // whatever the template didn't cover or when no template matches yet.
+      let templateFields = {};
+      try {
+        const templates = await OcrTemplate.find({ documentType: classification.documentType }).lean();
+        const templateResult = ocrWords.length > 0 ? applyBestTemplate(templates, classification.documentType, ocrWords) : null;
+        if (templateResult) templateFields = templateResult.fields;
+      } catch (templateErr) {
+        console.error('[OCR template] match failed:', templateErr);
+      }
+      const regexFields = parseIdentityDocument(classification.documentType, cleanedText);
+      specific = { ...classification, ...regexFields, ...templateFields };
     } else {
       specific = { ...classification };
     }
@@ -745,7 +793,7 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
         console.error('Backup LLM extraction failed, returning regex/heuristic map:', llmError);
       }
     }
-    return res.status(200).json({ success: true, extracted: true, data: parsed, rawText: cleanedText });
+    return res.status(200).json({ success: true, extracted: true, data: parsed, rawText: cleanedText, ocrWords });
   } catch (err) {
     cleanupTempFiles(tempFiles);
     console.error('[server error]', err);
@@ -754,4 +802,29 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     if (worker) { try { await worker.terminate(); } catch (_) { /* already terminated */ } }
   }
 });
+// Called when the user hits "Save Document" after reviewing/correcting the
+// auto-filled fields. This is the "training" step: it takes the OCR word
+// boxes from the original scan (echoed back by the client — see ocrWords in
+// the /scan-receipt response) plus whatever field values the user actually
+// confirmed, locates each value among the OCR words, and learns/updates a
+// position-based template for that layout. No labeling tool, no retraining
+// job — every save that includes a correction quietly improves the next
+// scan of a similarly-laid-out document.
+router.post('/confirm-extraction', authMiddleware, asyncHandler(async (req, res) => {
+  const { documentType, ocrWords, fields } = req.body || {};
+  if (!documentType || !Array.isArray(ocrWords) || ocrWords.length === 0 || !fields || typeof fields !== 'object') {
+    return res.status(400).json({ error: 'documentType, ocrWords, and fields are required.' });
+  }
+  // Only Identity & Legal document types have a template-learning parser
+  // wired up today (see parseIdentityDocument dispatch in /scan-receipt).
+  const existing = await OcrTemplate.findOne({ documentType }).sort({ sampleCount: -1 });
+  const updated = learnTemplate(existing, documentType, ocrWords, fields);
+  await OcrTemplate.findOneAndUpdate(
+    { documentType, fingerprint: updated.fingerprint },
+    { $set: { anchors: updated.anchors, fields: updated.fields, sampleCount: updated.sampleCount } },
+    { upsert: true }
+  );
+  return res.status(200).json({ success: true, learnedFields: Object.keys(updated.fields) });
+}));
+
 module.exports = router;
