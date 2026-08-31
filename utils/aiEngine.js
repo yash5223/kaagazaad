@@ -56,7 +56,7 @@ function findMatchingAssets(query, assets, limit = 5) {
     ].filter(Boolean).join(' ').toLowerCase();
     let score = 0;
     qWords.forEach(w => {
-      if (w.length < 3) return; 
+      if (w.length < 3) return;
       if (haystack.includes(w)) score += w.length >= 4 ? 2 : 1;
     });
     return { asset, score };

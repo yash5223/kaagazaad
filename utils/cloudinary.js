@@ -5,7 +5,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 const FOLDER = process.env.CLOUDINARY_FOLDER || 'kaagazaad';
-const DEFAULT_SIGNED_URL_TTL_SECONDS = 15 * 60; 
+const DEFAULT_SIGNED_URL_TTL_SECONDS = 15 * 60;
 function uploadBufferToCloudinary(buffer, publicId, resourceType = 'auto') {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(

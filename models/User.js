@@ -9,7 +9,7 @@ const userSchema = new mongoose.Schema({
   phone: { type: String, required: true, unique: true, trim: true },
   aadhaarEncrypted: { type: String, required: true },
   aadhaarHash: { type: String, required: true, unique: true, index: true },
-  passwordHash: { type: String, required: true }, 
+  passwordHash: { type: String, required: true },
   emailVerified: { type: Boolean, default: false },
   subscription_plan: { type: String, default: ""  },
   customer_id: { type: String, unique: true },

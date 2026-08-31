@@ -98,7 +98,7 @@ const schemas = {
     email,
   }),
   registerPassword: z.object({
-    passwordHash: strongPassword, 
+    passwordHash: strongPassword,
   }).passthrough(),
   resetPassword: z.object({
     newPassword: strongPassword,

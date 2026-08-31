@@ -46,7 +46,7 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.cspNonce}'`],
-      styleSrc: ["'self'", "'unsafe-inline'"], 
+      styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:'],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
@@ -55,7 +55,7 @@ app.use(helmet({
       connectSrc: ["'self'"],
     },
   },
-  crossOriginResourcePolicy: { policy: 'cross-origin' }, 
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
   hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
   referrerPolicy: { policy: 'no-referrer' },
 }));
@@ -99,7 +99,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/receipt', scanReceiptRoutes);
 app.use('/api/assets', assetRoutes);
 app.use('/api/vault', vaultRoutes);
-app.use('/api/ai', aiRoutes); 
+app.use('/api/ai', aiRoutes);
 app.use('/api/alerts', alertRoutes);
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -120,7 +120,7 @@ if (MONGODB_URI.startsWith('mongodb://') && !/[?&]tls=true/.test(MONGODB_URI)) {
 }
 mongoose.set('bufferTimeoutMS', 8000);
 mongoose.connect(MONGODB_URI, {
-  serverSelectionTimeoutMS: 8000, 
+  serverSelectionTimeoutMS: 8000,
 })
   .then(async () => {
     console.log('Connected to MongoDB Atlas');
@@ -144,7 +144,7 @@ app.get('/', (req, res) => {
   res.send('Server is running');
 });
 app.get('/healthz', (req, res) => {
-  const dbState = mongoose.connection.readyState; 
+  const dbState = mongoose.connection.readyState;
   const ok = dbState === 1;
   res.status(ok ? 200 : 503).json({
     status: ok ? 'ok' : 'degraded',

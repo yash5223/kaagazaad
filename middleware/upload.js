@@ -1,7 +1,7 @@
 const multer = require('multer');
 const path = require('path');
 const ALLOWED_EXTENSIONS = new Set(['pdf', 'jpg', 'jpeg', 'png', 'doc', 'docx', 'xls', 'xlsx']);
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; 
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 function extOf(filename) {
   return path.extname(filename || '').replace('.', '').toLowerCase();
 }

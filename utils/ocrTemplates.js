@@ -1,24 +1,9 @@
-// Learns document layouts from corrected extractions instead of hardcoded
-// per-format regex/line-order parsers. This is the "automatic training"
-// piece: Tesseract's character recognition doesn't need retraining (it
-// already reads the text fine); what varies between an Aadhaar's old paper
-// format, new PVC format, e-Aadhaar PDF, etc. is WHERE each field sits on
-// the page. A template records that once, and every future scan of a
-// visually similar layout reuses it — no new code per format.
-//
-// Anchors are the fixed, always-present words we can reliably relocate
-// across scans of the same layout (a 12-digit number, "Male"/"Female", the
-// word "Aadhaar", ...). A template stores each field's bounding-box offset
-// *relative to its nearest anchor*, so it's robust to the whole card being
-// shifted/cropped/rotated slightly differently between photos.
-
 const ANCHOR_PATTERNS = [
   { key: 'genderWord', test: (w) => /^(male|female|transgender)$/i.test(w.text) },
   { key: 'numberGroup', test: (w) => /^\d{4}$/.test(w.text) },
   { key: 'aadhaarLabel', test: (w) => /^aadhaar$/i.test(w.text) },
   { key: 'panLabel', test: (w) => /^income$/i.test(w.text) },
 ];
-
 function findAnchors(words) {
   const found = [];
   for (const pattern of ANCHOR_PATTERNS) {
@@ -27,10 +12,6 @@ function findAnchors(words) {
   }
   return found;
 }
-
-// A layout "fingerprint" is just the relative positions of whichever anchors
-// were found, sorted by key so two scans of the same layout produce
-// comparable vectors even if OCR found the anchors in a different order.
 function fingerprint(anchors) {
   return anchors
     .slice()
@@ -38,7 +19,6 @@ function fingerprint(anchors) {
     .map((a) => `${a.key}:${a.x.toFixed(2)},${a.y.toFixed(2)}`)
     .join('|');
 }
-
 function distance(anchorsA, anchorsB) {
   const mapB = new Map(anchorsB.map((a) => [a.key, a]));
   let sum = 0;
@@ -52,10 +32,6 @@ function distance(anchorsA, anchorsB) {
   if (shared === 0) return Infinity;
   return sum / shared;
 }
-
-// Finds the OCR word (or short run of adjacent words on the same line) whose
-// text best matches `value`, so we can learn the field's on-page position
-// from a value we already know is correct (the user's typed correction).
 function locateValue(words, value) {
   const target = String(value || '').trim().toLowerCase();
   if (!target) return null;
@@ -78,7 +54,6 @@ function locateValue(words, value) {
   }
   return null;
 }
-
 function nearestAnchor(box, anchors) {
   const cx = (box.x0 + box.x1) / 2;
   const cy = (box.y0 + box.y1) / 2;
@@ -90,7 +65,6 @@ function nearestAnchor(box, anchors) {
   }
   return best;
 }
-
 // Builds (or updates) a template from a confirmed-correct set of field
 // values plus the OCR words from that same scan. Call this when the user
 // saves a document after correcting/confirming the extracted fields.
@@ -132,13 +106,8 @@ function learnTemplate(existingTemplate, documentType, words, confirmedFields) {
     sampleCount: (existingTemplate ? existingTemplate.sampleCount : 0) + 1,
   };
 }
-
 // Finds the best matching saved template for a new scan's anchors (within a
-// distance threshold — a bad match is worse than no match) and, if found,
-// reads each learned field's value off the new scan's words by relocating
-// its anchor-relative offset.
-const MATCH_DISTANCE_THRESHOLD = 0.05; // normalized page-fraction distance
-
+const MATCH_DISTANCE_THRESHOLD = 0.05; 
 function applyBestTemplate(templates, documentType, words) {
   const candidates = templates.filter((t) => t.documentType === documentType);
   if (candidates.length === 0) return null;
@@ -159,7 +128,6 @@ function applyBestTemplate(templates, documentType, words) {
     const cx = anchor.x + offset.dx;
     const cy = anchor.y + offset.dy;
     const box = { x0: cx - offset.width / 2, y0: cy - offset.height / 2, x1: cx + offset.width / 2, y1: cy + offset.height / 2 };
-    // Collect words whose centers fall inside the projected box.
     const hit = words
       .filter((w) => {
         const wx = (w.x0 + w.x1) / 2;
@@ -173,5 +141,4 @@ function applyBestTemplate(templates, documentType, words) {
   }
   return { matchedTemplate: best, matchDistance: bestDist, fields: result };
 }
-
 module.exports = { findAnchors, fingerprint, distance, locateValue, learnTemplate, applyBestTemplate };

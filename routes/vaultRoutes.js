@@ -192,17 +192,10 @@ router.post('/share-document', validate(schemas.shareDocumentBody), async (req, 
       return res.status(404).json({ error: 'Document not found in your vault.' });
     }
     const assetDocuments = asset.documents || [];
-    // `asset.documents` entries can be either legacy plain URL strings or
-    // newer { publicId, resourceType, format } objects (see models/Asset.js).
-    // The client only ever has resolved/signed URL strings, so match against
-    // the raw entry using documentEntryMatches (which understands both
-    // shapes) instead of a naive strict-equality `.includes()`.
     const matchedEntry =
       (documentPath && assetDocuments.find((d) => documentEntryMatches(d, documentPath))) ||
       assetDocuments.find((d) => d && d !== '-') ||
       null;
-    // Never let a raw object leak into documentPath (schema field is a
-    // String) — always resolve it down to a string, or fall back to ''.
     const primaryDocumentPath = matchedEntry ? resolveDocumentUrl(matchedEntry) || '' : '';
     const receiverKey = receiver.trim().toLowerCase();
     const receiverUser = await User.findOne({

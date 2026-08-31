@@ -1,6 +1,6 @@
 const MAX_ATTEMPTS = 5;
-const BASE_LOCKOUT_MS = 60 * 1000; 
-const MAX_LOCKOUT_MS = 30 * 60 * 1000; 
+const BASE_LOCKOUT_MS = 60 * 1000;
+const MAX_LOCKOUT_MS = 30 * 60 * 1000;
 function computeLockoutMs(priorLockoutCount) {
   const ms = BASE_LOCKOUT_MS * Math.pow(2, Math.max(0, priorLockoutCount));
   return Math.min(ms, MAX_LOCKOUT_MS);

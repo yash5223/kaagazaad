@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const ALGORITHM = 'aes-256-gcm';
-const IV_LENGTH = 12; 
+const IV_LENGTH = 12;
 function getEncryptionKey() {
   const keyHex = process.env.AADHAAR_ENCRYPTION_KEY;
   if (!keyHex) {

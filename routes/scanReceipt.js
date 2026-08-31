@@ -10,15 +10,10 @@ const { asyncHandler } = require('../middleware/errorHandler');
 const { getFieldSpecs, keyFromLabel } = require('../config/fieldLabels');
 const OcrTemplate = require('../models/OcrTemplate');
 const { learnTemplate, applyBestTemplate } = require('../utils/ocrTemplates');
-
 const uploadDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
-
-// Accepted for OCR scanning: common photo formats (incl. HEIC/HEIF from iPhones and
-// WEBP) plus PDF, DOC/DOCX and XLS/XLSX, since a large share of receipts/policies/
-// tickets now arrive as emailed or downloaded documents/spreadsheets rather than photos.
 const RECEIPT_ALLOWED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'pdf', 'doc', 'docx', 'xls', 'xlsx']);
 const RECEIPT_ALLOWED_MIMES = new Set([
   'image/jpeg',
@@ -27,21 +22,13 @@ const RECEIPT_ALLOWED_MIMES = new Set([
   'image/heic',
   'image/heif',
   'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-  'application/x-cfb', // legacy OLE container shared by .doc and .xls
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/x-cfb',
 ]);
-// Legacy OLE-based Office files (.doc / .xls) all sniff as the same generic
-// "application/x-cfb" compound-file mime, so the claimed extension is what tells them
-// apart once we already know the container format is genuine.
 const CFB_EXTENSIONS = new Set(['doc', 'xls']);
-// Max pages to rasterize + OCR for a scanned (image-only) PDF. Receipts/certificates
-// rarely run past a couple of pages, and capping this keeps a single scan fast.
 const MAX_PDF_PAGES_FOR_OCR = 3;
-// A PDF's embedded text layer is only trusted (and OCR skipped) once it clears this
-// many non-whitespace characters — short strings are usually just a watermark/footer.
 const MIN_EMBEDDED_TEXT_CHARS = 40;
-
 const upload = multer({
   dest: uploadDir,
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -53,7 +40,6 @@ const upload = multer({
     return cb(null, true);
   },
 });
-
 async function verifyReceiptImage(req, res, next) {
   if (!req.file) return next();
   try {
@@ -77,10 +63,8 @@ async function verifyReceiptImage(req, res, next) {
     return res.status(400).json({ error: 'Could not verify the uploaded file.' });
   }
 }
-
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434/api/generate';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1:8b';
-
 function extract(regex, text) {
   const match = text.match(regex);
   if (!match) return "";
@@ -126,18 +110,9 @@ function cleanOcrText(text) {
 }
 // Counts how many of a set of regexes match `text`. Used to score a document
 // against several category "profiles" at once and pick the best fit, instead
-// of the old first-match-wins chain (which meant anything that wasn't a
-// vehicle/jewellery/property/insurance/gadget silently fell through to
-// "Gadgets & Appliances / Purchase Invoice" no matter what it actually was).
 function scoreSignals(text, patterns) {
   return patterns.reduce((sum, p) => sum + (p.test(text) ? 1 : 0), 0);
 }
-
-// Deliberately contains no university name, board name, or institute name —
-// these signals are generic wording every degree certificate / marksheet /
-// provisional certificate uses regardless of which university issued it
-// (SPPU, any other Indian university, or a foreign one), so classification
-// doesn't need to be taught each new university by name.
 const EDUCATION_SIGNALS = [
   /\bthis is to certify that\b/i,
   /\bhas been awarded\b/i,
@@ -166,12 +141,6 @@ const JEWELLERY_SIGNALS = [/\bgold\b/i, /\bdiamond\b/i, /\bcarat\b/i, /\bpurity\
 const PROPERTY_SIGNALS = [/\bflat\b/i, /\bapartment\b/i, /\bvilla\b/i, /\bplot\b/i, /\bkhata\b/i, /\brera\b/i, /\bsale deed\b/i, /\bbuilt[- ]?up area\b/i];
 const INSURANCE_SIGNALS = [/\bpolicy\b/i, /\binsurer\b/i, /\bsum insured\b/i, /\bsum assured\b/i, /\bpremium\b/i];
 const GADGET_SIGNALS = [/\bphone\b/i, /\bsmartphone\b/i, /\blaptop\b/i, /\bmacbook\b/i, /\bsmartwatch\b/i, /\btablet\b/i, /\bipad\b/i, /\btv\b/i, /\btelevision\b/i, /\brefrigerator\b/i, /\bfridge\b/i, /\bac\b/i, /\bwasher\b/i, /\bdryer\b/i, /\bmicrowave\b/i];
-
-// Classifies text against every known category profile and returns the best
-// match, so a document that isn't a receipt (a degree certificate, a
-// marksheet, an offer letter, ...) no longer gets forced into "Gadgets &
-// Appliances". Ties/no-signal cases fall back to the old default so existing
-// receipt-scanning behaviour for personal assets is unchanged.
 function classifyDocument(text) {
   const candidates = [
     { score: scoreSignals(text, EDUCATION_SIGNALS), category: 'Professional', subCategory: 'Certification', documentType: 'Degree' },
@@ -187,9 +156,6 @@ function classifyDocument(text) {
       })() },
     { score: scoreSignals(text, GADGET_SIGNALS), category: 'Personal', subCategory: 'Gadgets/Appliances', documentType: 'Purchase Invoice' },
   ];
-  // Education needs at least 2 independent signals before it wins — a single
-  // stray word (e.g. "semester" in an unrelated sentence) shouldn't be enough
-  // to reclassify a receipt as a degree certificate.
   const education = candidates[0];
   if (education.score < 2) education.score = 0;
   let best = candidates[0];
@@ -201,15 +167,6 @@ function classifyDocument(text) {
   }
   return { category: best.category, subCategory: best.subCategory, documentType: best.documentType };
 }
-
-// Mirrors the category → subCategory → documentType hierarchy in the Flutter
-// upload screen (_categoryHierarchy). Used only to resolve the user-typed
-// "what are you uploading?" hint (documentTypeHint) to a concrete
-// classification. classifyDocument() above (OCR-text signal scoring) is
-// still used whenever no hint is given or the hint doesn't match anything
-// specific enough — this is a shortcut for the categories/subcategories that
-// have no signal-based detector at all (Identity & Legal, Financial,
-// Healthcare, Employment, Business, Corporate, Legal, ...).
 const HINT_HIERARCHY = {
   Personal: {
     'Identity & Legal': ['Aadhaar Card', 'PAN Card', 'Passport', 'Driving Licence', 'Voter ID', 'Birth Certificate', 'Marriage Certificate', 'Name Change Affidavit'],
@@ -246,11 +203,9 @@ const HINT_HIERARCHY = {
     'Litigation Calendar': ['Litigation-related Calendar Documents'],
   },
 };
-
 function normalizeHintText(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
-
 // Flattened once at module load: [{ category, subCategory, documentType, normalized }]
 const HINT_ENTRIES = [];
 for (const [category, subCats] of Object.entries(HINT_HIERARCHY)) {
@@ -260,7 +215,6 @@ for (const [category, subCats] of Object.entries(HINT_HIERARCHY)) {
     }
   }
 }
-
 // Resolves a free-text hint like "aadhaar card" or "health insurance policy"
 // to a concrete category/subCategory/documentType by matching it against the
 // known document-type names above. Picks the longest matching name so e.g.
@@ -281,19 +235,11 @@ function classifyFromHint(hint) {
   if (!best) return null;
   return { category: best.category, subCategory: best.subCategory, documentType: best.documentType };
 }
-
 // University-agnostic on purpose: every pattern below matches generic
 // certificate/marksheet wording ("This is to certify that ...", "degree of
 // ...", "Seat No.", "CGPA") rather than any specific university's name or
-// layout, so the same function extracts an SPPU degree certificate, a
-// certificate from any other Indian university, or a foreign one, without
-// changes. `documentType` is passed through so a detected marksheet still
-// reports itself as such even though it shares the "Degree" field template.
 function parseEducationCertificate(documentType, text) {
   const isMarksheet = /\b(mark ?sheet|grade card|statement of marks|transcript)\b/i.test(text);
-  // [^\S\r\n] (horizontal whitespace only) keeps the name match on one line —
-  // \s alone matches newlines too and would swallow the next line's label
-  // (e.g. "Seat No") into the captured name.
   const name = extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
     || extract(/\bname\s*[: ][^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text);
   const universityLine = extract(/^.*\b(?:university|vidyapeeth|institute of technology|board of [a-z ]+ education)\b.*$/im, text);
@@ -312,7 +258,6 @@ function parseEducationCertificate(documentType, text) {
   return {
     // Keys computed with keyFromLabel() from the exact labels registered for
     // 'Certification|Degree' in config/fieldLabels.js (kept in sync with
-    // Flutter's _documentFieldLabels) — these are what the upload form reads.
     studentFullName: name || '',
     universityInstituteName: universityLine ? universityLine.replace(/\s{2,}/g, ' ').trim() : '',
     degreeName: degreeName ? degreeName.trim() : '',
@@ -334,15 +279,6 @@ function parseEducationCertificate(documentType, text) {
     documentType: isMarksheet ? 'Degree' : documentType,
   };
 }
-
-// Aadhaar/PAN cards print "Name" / "JOHN DOE" / "Male" / "1234 5678 9012" as
-// bare lines with no "Label: Value" pairing at all, so parseGenericLabelValues
-// below (and the LLM fallback, when no LLM backend is reachable) both come up
-// empty for them. These two dedicated parsers cover India's two most common
-// ID cards with plain regex/line heuristics — no LLM required. Keys are
-// computed with keyFromLabel() from the exact labels registered for
-// 'Identity & Legal|Aadhaar Card' / 'Identity & Legal|PAN Card' in
-// config/fieldLabels.js (kept in sync with Flutter's _documentFieldLabels).
 const AADHAAR_NUMBER_RE = /\b(\d{4}\s?\d{4}\s?\d{4})\b/;
 const PAN_NUMBER_RE = /\b([A-Z]{5}[0-9]{4}[A-Z])\b/;
 const VID_RE = /\bVID\b\s*[:.]?\s*(\d{4}\s?\d{4}\s?\d{4}\s?\d{4})/i;
@@ -350,19 +286,11 @@ const GENDER_RE = /\b(male|female|transgender)\b/i;
 const AADHAAR_DOB_RE = /(?:DOB|Date of Birth|D\.?O\.?B\.?|Year of Birth|YOB)\s*[:.]?\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4})/i;
 const ENROLMENT_ID_RE = /(?:Enrol(?:l)?ment|Update)\s*(?:No\.?|ID)?\s*[:.]?\s*([\d/]{10,})/i;
 const HEADER_LINE_RE = /government of india|unique identification|आधार|भारत सरकार|your aadhaar|income tax department|govt\.? of india|permanent account number/i;
-
-// OCR noise lines (stray watermark fragments, misread Hindi glyphs, page
-// artifacts) commonly show up as short garbage like "a]" or "> 41" sitting
-// right next to real fields. A name candidate line has to actually look like
-// a name — letters/spaces/apostrophes/hyphens only, at least 3 characters —
-// or we keep looking further back instead of grabbing the first non-header
-// line we see.
 function isPlausibleNameLine(line) {
   const trimmed = String(line || '').trim();
   if (trimmed.length < 3) return false;
   return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)*$/.test(trimmed);
 }
-
 function parseAadhaar(text) {
   const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const aadhaarNumber = extract(AADHAAR_NUMBER_RE, text).replace(/\s+/g, ' ');
@@ -409,7 +337,6 @@ function parseAadhaar(text) {
     issuingAuthority: 'UIDAI',
   };
 }
-
 function parsePan(text) {
   const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const panNumber = extract(PAN_NUMBER_RE, text);
@@ -438,24 +365,12 @@ function parsePan(text) {
     issuingAuthority: 'Income Tax Department',
   };
 }
-
-// Dispatches to the right dedicated Identity & Legal parser by documentType.
-// Document types with no dedicated parser yet (Passport, Driving Licence,
-// Voter ID, Birth/Marriage Certificate, ...) fall through to an empty object
-// here and still rely on parseGenericLabelValues() + the Ollama LLM fallback.
 function parseIdentityDocument(documentType, text) {
   const dt = String(documentType || '').toLowerCase();
   if (dt.includes('aadhaar')) return parseAadhaar(text);
   if (dt.includes('pan card') || dt === 'pan') return parsePan(text);
   return {};
 }
-
-// Generic "Label: Value" / "Label - Value" line scanner. Not tied to any
-// particular document type — it's the safety net that lets fields populate
-// for the long tail of document varieties (employment letters, business
-// registrations, award certificates, and anything else) that don't have a
-// dedicated parser, by matching whatever labels the document itself prints
-// and turning them into the same camelCase keys the Flutter form expects.
 function parseGenericLabelValues(text) {
   const result = {};
   const lineRe = /^([A-Za-z][A-Za-z0-9 /&().'-]{1,40}?)\s*[:\-]\s*(.{1,80})$/;
@@ -497,7 +412,6 @@ function parseInvoice(text, classification) {
     specField2: extract(/(?:RERA|Khata|VIN|Mileage|Serial Number|S\/N|Weight|Material)\s*[: ]\s*([A-Za-z0-9,.\- ]+)/i, text)
   };
 }
-
 // Runs the shared sharp preprocessing (deskew via EXIF rotate, resize, grayscale,
 // contrast normalize, sharpen) that materially improves Tesseract accuracy on noisy
 // phone photos, then writes the result as a PNG ready for OCR.
@@ -512,13 +426,6 @@ async function preprocessImageForOcr(inputPath, outputPath) {
     .png()
     .toFile(outputPath);
 }
-
-// OCRs a sequence of already-preprocessed image files with one shared Tesseract
-// worker (creating a worker per page would multiply startup cost) and concatenates
-// the recognized text, separating pages so downstream regexes still see clean lines.
-// Also collects each word's bounding box (normalized 0-1 against page width/height)
-// so a "seen this layout before" template matcher can learn where fields sit,
-// instead of only ever reasoning about flattened line order.
 async function ocrImageFiles(worker, imagePaths) {
   let combinedText = '';
   let confidenceSum = 0;
@@ -565,7 +472,6 @@ async function ocrImageFiles(worker, imagePaths) {
     words,
   };
 }
-
 function trackTemp(list, filePath) {
   list.push(filePath);
   return filePath;
@@ -575,7 +481,6 @@ function cleanupTempFiles(paths) {
     if (p && fs.existsSync(p)) fs.unlink(p, () => {});
   }
 }
-
 router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyReceiptImage, async (req, res) => {
   const Tesseract = require('tesseract.js');
   const tempFiles = [];
@@ -590,17 +495,12 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
       return res.status(500).json({ error: 'OCR language data missing on server (eng.traineddata not found).' });
     }
     console.log(`[OCR] Using trained data at ${trainedDataPath} (${fs.statSync(trainedDataPath).size} bytes)`);
-
     const mime = req.file.detectedMime;
     let rawText = '';
     let ocrConfidence = 0;
     let ocrWords = [];
     const imagesToOcr = [];
-
     if (mime === 'application/pdf') {
-      // A digital PDF (e-invoice, e-ticket, e-policy) already has a text layer — reading
-      // it directly is faster and far more accurate than rasterizing + OCR-ing it, so try
-      // that first and only fall back to OCR for scanned/photographed PDFs.
       const { PDFParse } = require('pdf-parse');
       const pdfBuffer = await fsp.readFile(req.file.path);
       let parser = null;
@@ -626,22 +526,17 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
         if (parser) await parser.destroy();
       }
     } else if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      // .docx has a text layer just like a digital PDF — read it directly, no OCR needed.
       const mammoth = require('mammoth');
       const { value: docxText } = await mammoth.extractRawText({ path: req.file.path });
       rawText = (docxText || '').trim();
       ocrConfidence = rawText ? 100 : 0;
     } else if (req.file.detectedExt === 'doc') {
-      // Legacy binary .doc — mammoth only understands the modern .docx XML format,
-      // so pull the body text out of the OLE container with word-extractor instead.
       const WordExtractor = require('word-extractor');
       const extractor = new WordExtractor();
       const extracted = await extractor.extract(req.file.path);
       rawText = (extracted.getBody() || '').trim();
       ocrConfidence = rawText ? 100 : 0;
     } else if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || req.file.detectedExt === 'xls') {
-      // SheetJS reads both modern .xlsx and legacy .xls workbooks. Flatten every sheet
-      // to CSV-ish text so the same regex/LLM extraction used for receipts still works.
       const XLSX = require('xlsx');
       const workbook = XLSX.readFile(req.file.path);
       const sheetTexts = workbook.SheetNames.map((sheetName) => {
@@ -653,8 +548,6 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     } else {
       let sourcePath = req.file.path;
       if (mime === 'image/heic' || mime === 'image/heif') {
-        // sharp/libvips can't reliably decode HEIC/HEIF (common for iPhone photos) across
-        // all deployment environments, so decode it to JPEG ourselves first.
         const convert = require('heic-convert');
         const heicBuffer = await fsp.readFile(req.file.path);
         const jpegBuffer = await convert({ buffer: heicBuffer, format: 'JPEG', quality: 0.92 });
@@ -665,7 +558,6 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
       await preprocessImageForOcr(sourcePath, procPath);
       imagesToOcr.push(procPath);
     }
-
     if (!rawText && imagesToOcr.length > 0) {
       worker = await Tesseract.createWorker('eng', 1, {
         langPath: path.join(__dirname, '..'),
@@ -687,28 +579,14 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
         worker = null;
       }
     }
-
     console.log(`[OCR] extracted ${rawText.trim().length} chars, confidence ${ocrConfidence}`);
     cleanupTempFiles(tempFiles);
-
     if (!rawText || !rawText.trim()) {
       return res.status(200).json({ success: true, extracted: false });
     }
-
     const cleanedText = cleanOcrText(rawText);
-
-    // 1. Classify once: which category/subCategory/documentType is this?
-    // If the user told us what they're uploading (documentTypeHint, from the
-    // "what are you uploading?" prompt before file selection), trust that
-    // over statistical text scoring — it also covers categories that have no
-    // OCR-signal detector at all (Identity & Legal, Financial, Healthcare,
-    // Employment, Business, Corporate, Legal, ...). Otherwise fall back to
-    // classifyDocument()'s signal scoring, which still works across every
-    // category it does support, including university-agnostic degree
-    // certificates and marksheets.
     const documentTypeHint = typeof req.body.documentTypeHint === 'string' ? req.body.documentTypeHint.trim() : '';
     const classification = classifyFromHint(documentTypeHint) || classifyDocument(cleanedText);
-
     // 2. Run the extractor suited to that classification.
     const ASSET_SUBCATEGORIES = new Set(['Vehicle', 'Jewellery', 'Property', 'Insurance', 'Gadgets/Appliances', 'Gadgets & Appliances']);
     let specific;
@@ -717,10 +595,6 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     } else if (ASSET_SUBCATEGORIES.has(classification.subCategory)) {
       specific = parseInvoice(cleanedText, classification);
     } else if (classification.subCategory === 'Identity & Legal') {
-      // Prefer a learned layout template (built from past user corrections —
-      // see /confirm-extraction below) since it generalizes across formats
-      // without new code; fall back to the hardcoded regex parser for
-      // whatever the template didn't cover or when no template matches yet.
       let templateFields = {};
       try {
         const templates = await OcrTemplate.find({ documentType: classification.documentType }).lean();
@@ -734,19 +608,7 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     } else {
       specific = { ...classification };
     }
-
-    // 3. Always run the generic label:value line scanner as a safety net —
-    // it fills gaps for whatever the specific extractor above missed,
-    // without overriding anything it already found (specific wins on
-    // conflicts since it's spread second).
     let parsed = { ...parseGenericLabelValues(cleanedText), ...specific };
-
-    // 4. Decide whether to top up with the local LLM: count meaningful
-    // (non-empty, non-classification) fields we already have. Below the
-    // threshold — or for a document type that has a known field template but
-    // regex/heuristics under-filled it — ask Ollama for exactly the fields
-    // this document type's form actually shows, so results come back keyed
-    // the same way the specific extractor's do.
     const meaningfulCount = Object.entries(parsed).filter(([k, v]) => (
       !['category', 'subCategory', 'documentType'].includes(k) && v !== undefined && v !== null && String(v).trim() !== ''
     )).length;
@@ -776,8 +638,6 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
             llmParsed.storeOrSeller = llmParsed.store;
             llmParsed.issuingAuthority = llmParsed.store;
           }
-          // LLM only fills what regex/heuristics left empty — never overrides
-          // an already-extracted value.
           for (const [key, value] of Object.entries(llmParsed)) {
             if (value === undefined || value === null || String(value).trim() === '') continue;
             if (parsed[key] === undefined || parsed[key] === null || String(parsed[key]).trim() === '') {
@@ -815,8 +675,6 @@ router.post('/confirm-extraction', authMiddleware, asyncHandler(async (req, res)
   if (!documentType || !Array.isArray(ocrWords) || ocrWords.length === 0 || !fields || typeof fields !== 'object') {
     return res.status(400).json({ error: 'documentType, ocrWords, and fields are required.' });
   }
-  // Only Identity & Legal document types have a template-learning parser
-  // wired up today (see parseIdentityDocument dispatch in /scan-receipt).
   const existing = await OcrTemplate.findOne({ documentType }).sort({ sampleCount: -1 });
   const updated = learnTemplate(existing, documentType, ocrWords, fields);
   await OcrTemplate.findOneAndUpdate(
@@ -826,5 +684,4 @@ router.post('/confirm-extraction', authMiddleware, asyncHandler(async (req, res)
   );
   return res.status(200).json({ success: true, learnedFields: Object.keys(updated.fields) });
 }));
-
 module.exports = router;

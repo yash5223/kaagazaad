@@ -7,12 +7,12 @@ function jsonRateLimitHandler(message) {
 }
 const loginSlowDown = slowDown({
   windowMs: 15 * 60 * 1000,
-  delayAfter: 3, 
-  delayMs: (hits) => (hits - 3) * 500, 
-  maxDelayMs: 8000, 
+  delayAfter: 3,
+  delayMs: (hits) => (hits - 3) * 500,
+  maxDelayMs: 8000,
 });
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, 
+  windowMs: 15 * 60 * 1000,
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,

@@ -1,8 +1,8 @@
 const crypto = require('crypto');
 const { logSecurityEvent } = require('../utils/securityLog');
-const REPLAY_WINDOW_MS = 5 * 60 * 1000; 
+const REPLAY_WINDOW_MS = 5 * 60 * 1000;
 const NONCE_TTL_MS = REPLAY_WINDOW_MS + 60 * 1000;
-const seenNonces = new Map(); 
+const seenNonces = new Map();
 let cleanupTimer = null;
 function startNonceCleanup() {
   if (cleanupTimer) return;
@@ -42,7 +42,7 @@ function requestSignature({ required = true } = {}) {
         req,
         meta: { reason: message, path: req.originalUrl.split('?')[0], method: req.method },
       });
-      if (!required) return next(); 
+      if (!required) return next();
       return res.status(status).json({ error: message });
     };
     if (!timestamp || !nonce || !signature) {

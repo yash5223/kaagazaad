@@ -31,7 +31,7 @@ router.post(
   validate(schemas.saveAssetBody),
   validateAssetDataField,
   asyncHandler(async (expressRequest, expressResponse) => {
-    const assetData = expressRequest.assetData; 
+    const assetData = expressRequest.assetData;
     const userMatch = await User.findById(expressRequest.user.id);
     if (!userMatch) {
       return expressResponse.status(401).json({ error: 'Invalid user account credentials.' });
