@@ -55,6 +55,28 @@ router.post(
     const storeOrSellerValue = assetData.storeOrSeller || '';
     const editAssetId = assetData._id || assetData.id;
     const isEdit = Boolean(editAssetId);
+    // The upload form sends a document-type-specific set of field keys
+    // (e.g. Aadhaar Card -> fullName/aadhaarNumber/gender/address/vid/...)
+    // that don't match the fixed documentNumber/issuingAuthority/etc. keys
+    // `buildDynamicFields` understands. Those extra keys were previously
+    // dropped on the floor here, so the saved document never had them even
+    // though the user filled them in on the form. Pass anything else the
+    // client sent straight through so it gets stored and can be shown back
+    // on the document details screen (which already renders unknown asset
+    // keys generically).
+    const KNOWN_META_KEYS = new Set([
+      '_id', 'id', 'name', 'category', 'subCategory', 'subSubCategory',
+      'documentType', 'issueDate', 'notesOrAddress', 'storeOrSeller',
+    ]);
+    const extraFields = {};
+    for (const [key, rawValue] of Object.entries(assetData)) {
+      if (KNOWN_META_KEYS.has(key) || Object.prototype.hasOwnProperty.call(dynamicFields, key)) {
+        continue;
+      }
+      if (rawValue === undefined || rawValue === null) continue;
+      const trimmed = String(rawValue).trim();
+      extraFields[key] = trimmed === '' || trimmed === '-' ? '' : trimmed;
+    }
     const assetFields = {
       userId: userMatch.customer_id,
       name: assetData.name,
@@ -65,6 +87,7 @@ router.post(
       notesOrAddress: assetData.notesOrAddress || '',
       storeOrSeller: storeOrSellerValue,
       ...dynamicFields,
+      ...extraFields,
     };
     if (assetDocuments.length > 0) {
       assetFields.documents = assetDocuments;

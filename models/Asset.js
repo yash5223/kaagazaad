@@ -38,6 +38,17 @@ const assetSchema = new mongoose.Schema(
     documents: { type: [mongoose.Schema.Types.Mixed], default: [] },
     serviceRecords: { type: [serviceRecordSchema], default: [] },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    // The Flutter upload form asks a different set of questions per
+    // document type (e.g. Aadhaar Card -> fullName/aadhaarNumber/gender/...,
+    // Passport -> passportNumber/nationality/..., see
+    // upload_screen.dart's `_documentFieldLabels`). There are ~150 such
+    // keys across all document types, so instead of declaring every one of
+    // them as a schema path, `strict: false` lets Mongoose persist whatever
+    // extra flat fields routes/assetRoutes.js passes through for a given
+    // document type, alongside the fixed fields above.
+    strict: false,
+  }
 );
 module.exports = mongoose.model('Asset', assetSchema);
