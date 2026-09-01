@@ -18,16 +18,17 @@ const assetSchema = new mongoose.Schema(
     issueDate: { type: Date },
     notesOrAddress: { type: String, default: '' },
     storeOrSeller: { type: String, default: '' },
-    // Dynamic fields — only the ones relevant to `subSubCategory` (the
-    // document type) get a real value when an asset is saved (see
-    // config/documentFieldTemplates.js).
-    // Every other key below is explicitly stored as '' so every document
-    // in the collection has the same flat, predictable shape.
-    documentNumber: { type: String, default: '' },
-    issuingAuthority: { type: String, default: '' },
-    expiryDate: { type: String, default: '' },
-    valueAmount: { type: String, default: '' },
-    invoiceNumber: { type: String, default: '' },
+    // Deliberately NOT declaring documentNumber/issuingAuthority/expiryDate/
+    // valueAmount/invoiceNumber (or any other dynamic field) as schema
+    // paths here. A `default: ''` on a declared path gets applied by
+    // Mongoose on every new document regardless of what was actually sent,
+    // which is exactly the "extra fields the UI never asked for" problem.
+    // Instead, `strict: false` below lets routes/assetRoutes.js write
+    // exactly the flat dynamic fields the upload form sent for that
+    // specific document type (fullName/aadhaarNumber/... for an Aadhaar
+    // Card, documentNumber/issuingAuthority/expiryDate/amount for a
+    // generic/unlisted type, etc.) — no more, no less — and nothing else
+    // gets auto-added.
     // Mixed, not String: documents saved before this security hardening
     // pass are plain public Cloudinary URL strings. Documents saved after
     // it are private "authenticated" Cloudinary assets, stored as

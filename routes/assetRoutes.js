@@ -3,7 +3,6 @@ const router = express.Router();
 const User = require('../models/User');
 const Asset = require('../models/Asset');
 const authMiddleware = require('../middleware/authMiddleware');
-const { buildDynamicFields } = require('../config/documentFieldTemplates');
 const {
   uploadBufferToCloudinary,
   deleteFromCloudinaryByUrl,
@@ -50,32 +49,34 @@ router.post(
       }
     }
     const documentTypeValue = assetData.subSubCategory || assetData.documentType || '';
-    const dynamicFields = buildDynamicFields(documentTypeValue, assetData);
     const issueDateValue = assetData.issueDate;
     const storeOrSellerValue = assetData.storeOrSeller || '';
     const editAssetId = assetData._id || assetData.id;
     const isEdit = Boolean(editAssetId);
-    // The upload form sends a document-type-specific set of field keys
-    // (e.g. Aadhaar Card -> fullName/aadhaarNumber/gender/address/vid/...)
-    // that don't match the fixed documentNumber/issuingAuthority/etc. keys
-    // `buildDynamicFields` understands. Those extra keys were previously
-    // dropped on the floor here, so the saved document never had them even
-    // though the user filled them in on the form. Pass anything else the
-    // client sent straight through so it gets stored and can be shown back
-    // on the document details screen (which already renders unknown asset
-    // keys generically).
+    // The upload form builds its field list per document type (see
+    // upload_screen.dart's `_documentFieldLabels` / `_activeFieldSpecs`) and
+    // only ever sends the keys that are actually shown on that form — e.g.
+    // Aadhaar Card sends fullName/aadhaarNumber/gender/address/vid/..., a
+    // Passport sends a different set, and an unlisted type falls back to
+    // documentNumber/issuingAuthority/expiryDate/amount. We used to run
+    // this through `buildDynamicFields`, which only recognised a fixed
+    // legacy set of keys (documentNumber/issuingAuthority/expiryDate/
+    // valueAmount/invoiceNumber): it silently dropped every other key the
+    // form actually sent, and force-added those legacy keys as empty
+    // strings even for document types whose form never shows them. Instead,
+    // store exactly the dynamic fields the client sent — no more, no less —
+    // by passing through everything that isn't one of the known meta
+    // fields.
     const KNOWN_META_KEYS = new Set([
       '_id', 'id', 'name', 'category', 'subCategory', 'subSubCategory',
       'documentType', 'issueDate', 'notesOrAddress', 'storeOrSeller',
     ]);
-    const extraFields = {};
+    const dynamicFields = {};
     for (const [key, rawValue] of Object.entries(assetData)) {
-      if (KNOWN_META_KEYS.has(key) || Object.prototype.hasOwnProperty.call(dynamicFields, key)) {
-        continue;
-      }
+      if (KNOWN_META_KEYS.has(key)) continue;
       if (rawValue === undefined || rawValue === null) continue;
       const trimmed = String(rawValue).trim();
-      extraFields[key] = trimmed === '' || trimmed === '-' ? '' : trimmed;
+      dynamicFields[key] = trimmed === '' || trimmed === '-' ? '' : trimmed;
     }
     const assetFields = {
       userId: userMatch.customer_id,
@@ -87,7 +88,6 @@ router.post(
       notesOrAddress: assetData.notesOrAddress || '',
       storeOrSeller: storeOrSellerValue,
       ...dynamicFields,
-      ...extraFields,
     };
     if (assetDocuments.length > 0) {
       assetFields.documents = assetDocuments;
