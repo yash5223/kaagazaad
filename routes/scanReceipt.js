@@ -322,15 +322,25 @@ function classifyFromHint(hint) {
 // in config/fieldLabels.js.
 function parseEducationCertificate(classification, text) {
   const { category, subCategory, documentType } = classification;
-  const name = extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
+  // Real marksheets label this "Name of Candidate"/"Name of Student" (not
+  // bare "Name"), and OCR frequently drops or mangles the colon between a
+  // label and its value on scanned/table-heavy layouts (e.g. "Seat No. 1 1.
+  // B190412345" where "1 1." is OCR noise standing in for the missing
+  // colon). These patterns tolerate that noise instead of requiring the
+  // label to sit immediately next to a clean separator.
+  const name = extract(/name\s+of\s+(?:candidate|student)[^A-Za-z\r\n]{0,8}([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
+    || extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
     || extract(/\bname\s*[: ][^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text);
   const instituteLine = extract(/^.*\b(?:university|vidyapeeth|institute of technology|board of [a-z ]+ education|school|college)\b.*$/im, text);
   const instituteClean = instituteLine ? instituteLine.replace(/\s{2,}/g, ' ').trim() : '';
   const degreeName = extract(/\b((?:bachelor|master) of [A-Za-z .&()]+|diploma in [A-Za-z .&()]+|b\.?\s?e\.?|b\.?\s?tech\.?|m\.?\s?e\.?|m\.?\s?tech\.?|b\.?\s?sc\.?|m\.?\s?sc\.?|b\.?\s?com\.?|m\.?\s?com\.?|ph\.?\s?d\.?)\b/i, text);
   const branch = extract(/\(([A-Za-z &,.]{3,60})\)/, text)
     || extract(/(?:branch|specialization|stream|course)\s*(?:of|in)?\s*[: ]\s*([A-Za-z &]+)/i, text);
-  const seatNumber = extract(/(?:seat\s*no\.?|exam\s*seat\s*no\.?|roll\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
-  const enrollmentNumber = extract(/(?:enrol{1,2}ment\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text) || extract(/\bprn\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const seatNumber = extract(/(?:seat\s*no\.?|exam\s*seat\s*no\.?)(?:[^A-Za-z0-9\r\n]{0,5}\d{1,2}){0,3}[^A-Za-z0-9\r\n]{0,5}\b([A-Z]{0,3}\d{6,12})\b/i, text)
+    || extract(/(?:seat\s*no\.?|exam\s*seat\s*no\.?|roll\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const enrollmentNumber = extract(/(?:enrol{1,2}ment\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text)
+    || extract(/\bprn\s*(?:no\.?)?[^0-9\r\n]{0,10}(\d{9,14})\b/i, text)
+    || extract(/\bprn\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
   const certificateNumber = extract(/certificate\s*no\.?\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
   const classOrGrade = extract(/\b(first class with distinction|first class|higher second class|second class|pass class|distinction|honou?rs)\b/i, text);
   const cgpa = extract(/\b[cs]gpa\s*[: ]\s*([\d.]{1,5})/i, text);
