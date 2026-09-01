@@ -136,6 +136,47 @@ const EDUCATION_SIGNALS = [
   /\bprn\b/i,
   /\benrol(l)?ment no\.?\b/i,
 ];
+// Marksheets (school-level or semester) overlap heavily with degree-certificate
+// wording, so they share the same EDUCATION_SIGNALS scoring pass; this narrower
+// set is only used afterwards to decide marksheet vs degree, and school vs
+// university level, once "education" has already won the category contest.
+const MARKSHEET_SIGNALS = [
+  /\bmark ?sheet\b/i,
+  /\bgrade card\b/i,
+  /\bstatement of marks\b/i,
+  /\btranscript\b/i,
+  /\bsemester\b/i,
+  /\b(cgpa|sgpa)\b/i,
+  /\bssc\b/i,
+  /\bhsc\b/i,
+  /\bboard of secondary education\b/i,
+  /\bboard of (?:higher )?secondary education\b/i,
+];
+const TENTH_SIGNALS = [/\b10th\b/i, /\bssc\b/i, /\bsecondary school certificate\b/i, /\bx\s*std\b/i, /\bclass\s*x\b/i];
+const TWELFTH_SIGNALS = [/\b12th\b/i, /\bhsc\b/i, /\bhigher secondary certificate\b/i, /\bxii\s*std\b/i, /\bclass\s*xii\b/i, /\bintermediate\b/i];
+const UTILITY_SIGNALS = [/\belectricity\b/i, /\bwater bill\b/i, /\bgas bill\b/i, /\bbroadband\b/i, /\binternet bill\b/i, /\bmobile bill\b/i, /\bpostpaid\b/i, /\bunits consumed\b/i, /\bmeter (?:no|number)\b/i, /\bbill amount\b/i, /\bdue date\b/i, /\bconsumer (?:no|number)\b/i];
+const RATION_SIGNALS = [/\bration card\b/i, /\bpublic distribution\b/i, /\bfair price shop\b/i, /\bhead of family\b/i, /\bapl\b/i, /\bbpl\b/i];
+// Domicile/caste/income certificates are issued by the same revenue-office
+// machinery (Tehsildar, SDM, Collector, Mandal/Taluka office) with common
+// boilerplate ("this is to certify that ... is a resident of / belongs to
+// ... caste / has an annual income of ..."), so one signal set scores the
+// whole "Government Certificates" group and a keyword pass below picks the
+// specific type.
+const GOV_CERT_SIGNALS = [
+  /\bdomicile\b/i,
+  /\bresident(?:ial)? certificate\b/i,
+  /\bcaste certificate\b/i,
+  /\bincome certificate\b/i,
+  /\bnon[- ]?creamy layer\b/i,
+  /\btehsildar\b/i,
+  /\bsub[- ]?divisional (?:magistrate|officer)\b/i,
+  /\bsdm\b/i,
+  /\bcollector\b/i,
+  /\brevenue department\b/i,
+  /\bmandal\b/i,
+  /\btaluka\b/i,
+  /\bannual income\b/i,
+];
 const VEHICLE_SIGNALS = [/\bcar\b/i, /\bmotorcycle\b/i, /\bsuv\b/i, /\bsedan\b/i, /\bmileage\b/i, /\bvin\b/i, /\bregistration number\b/i, /\bchassis\b/i, /\bpuc\b/i];
 const JEWELLERY_SIGNALS = [/\bgold\b/i, /\bdiamond\b/i, /\bcarat\b/i, /\bpurity\b/i, /\bjewel+ery\b/i, /\bnecklace\b/i, /\bring\b/i, /\bsilver\b/i, /\bhallmark\b/i];
 const PROPERTY_SIGNALS = [/\bflat\b/i, /\bapartment\b/i, /\bvilla\b/i, /\bplot\b/i, /\bkhata\b/i, /\brera\b/i, /\bsale deed\b/i, /\bbuilt[- ]?up area\b/i];
@@ -155,6 +196,22 @@ function classifyDocument(text) {
         return 'Health Insurance';
       })() },
     { score: scoreSignals(text, GADGET_SIGNALS), category: 'Personal', subCategory: 'Gadgets/Appliances', documentType: 'Purchase Invoice' },
+    { score: scoreSignals(text, UTILITY_SIGNALS), category: 'Personal', subCategory: 'Utilities & Bills', documentType: (() => {
+        if (/\belectricity\b/i.test(text)) return 'Electricity Bill';
+        if (/\bwater\b/i.test(text)) return 'Water Bill';
+        if (/\bgas\b/i.test(text)) return 'Gas Bill';
+        if (/\bbroadband\b|\binternet\b/i.test(text)) return 'Broadband/Internet Bill';
+        if (/\bmobile\b|\bpostpaid\b/i.test(text)) return 'Mobile Bill';
+        return 'Other';
+      })() },
+    { score: scoreSignals(text, RATION_SIGNALS), category: 'Personal', subCategory: 'Identity & Legal', documentType: 'Ration Card' },
+    { score: scoreSignals(text, GOV_CERT_SIGNALS), category: 'Personal', subCategory: 'Government Certificates', documentType: (() => {
+        if (/non[- ]?creamy layer/i.test(text)) return 'Non-Creamy Layer Certificate';
+        if (/\bdomicile\b|\bresident(?:ial)? certificate\b/i.test(text)) return 'Domicile Certificate';
+        if (/\bcaste certificate\b|\bcaste\b/i.test(text)) return 'Caste Certificate';
+        if (/\bincome certificate\b|\bannual income\b/i.test(text)) return 'Income Certificate';
+        return 'Other';
+      })() },
   ];
   const education = candidates[0];
   if (education.score < 2) education.score = 0;
@@ -165,11 +222,27 @@ function classifyDocument(text) {
   if (best.score === 0) {
     return { category: 'Personal', subCategory: 'Gadgets/Appliances', documentType: 'Purchase Invoice' };
   }
-  return { category: best.category, subCategory: best.subCategory, documentType: best.documentType };
+  let result = { category: best.category, subCategory: best.subCategory, documentType: best.documentType };
+  // Education wins the category contest for both degree certificates and
+  // marksheets (they share wording like "university", "cgpa", "seat no").
+  // Only once education has already won do we split marksheet vs degree,
+  // and school-level (SSC/HSC) vs semester-level, using the narrower signals.
+  if (result.subCategory === 'Certification' && result.documentType === 'Degree') {
+    const looksLikeDegree = /\b(degree of|bachelor of|master of|convocation|has been awarded)\b/i.test(text);
+    const looksLikeMarksheet = scoreSignals(text, MARKSHEET_SIGNALS) >= 2;
+    if (looksLikeMarksheet && !looksLikeDegree) {
+      let eduDocType = 'Semester Marksheet';
+      if (scoreSignals(text, TWELFTH_SIGNALS) > 0) eduDocType = '12th Marksheet';
+      else if (scoreSignals(text, TENTH_SIGNALS) > 0) eduDocType = '10th Marksheet';
+      result = { category: 'Personal', subCategory: 'Education', documentType: eduDocType };
+    }
+  }
+  return result;
 }
 const HINT_HIERARCHY = {
   Personal: {
-    'Identity & Legal': ['Aadhaar Card', 'PAN Card', 'Passport', 'Driving Licence', 'Voter ID', 'Birth Certificate', 'Marriage Certificate', 'Name Change Affidavit'],
+    'Identity & Legal': ['Aadhaar Card', 'PAN Card', 'Passport', 'Driving Licence', 'Voter ID', 'Birth Certificate', 'Marriage Certificate', 'Name Change Affidavit', 'Ration Card'],
+    'Government Certificates': ['Domicile Certificate', 'Caste Certificate', 'Income Certificate', 'Non-Creamy Layer Certificate'],
     Financial: ['Bank Account Documents', 'Fixed Deposits (FDs)', 'Mutual Funds (MF)', 'IT Returns', 'Form 16', 'Loan Documents'],
     Insurance: ['Health Insurance', 'Life Insurance', 'Vehicle Insurance', 'Home Insurance', 'Travel Insurance'],
     Healthcare: ['Medical Reports', 'Prescriptions', 'Vaccinations', 'Blood Group Information'],
@@ -178,6 +251,8 @@ const HINT_HIERARCHY = {
     'Gadgets/Appliances': ['Refrigerator', 'Washing Machine', 'Laptop', 'Robo Cleaner', 'User Manual', 'AMC', 'Service Record'],
     Jewellery: ['Hallmark Certificate', 'Valuation Certificate'],
     Travel: ['Flight Ticket', 'Hotel Booking', 'Visa', 'Foreign Exchange Records'],
+    Education: ['10th Marksheet', '12th Marksheet', 'Semester Marksheet', 'Hall Ticket / Admit Card', 'Transfer Certificate (TC)', 'Bonafide Certificate', 'School/College ID Card'],
+    'Utilities & Bills': ['Electricity Bill', 'Water Bill', 'Gas Bill', 'Broadband/Internet Bill', 'Mobile Bill'],
   },
   Professional: {
     Employment: ['Appointment Letter', 'Offer Letter', 'Experience Certificate', 'Relieving Letter', 'Salary Slip', 'Promotion Letters', 'Appraisal'],
@@ -238,14 +313,22 @@ function classifyFromHint(hint) {
 // University-agnostic on purpose: every pattern below matches generic
 // certificate/marksheet wording ("This is to certify that ...", "degree of
 // ...", "Seat No.", "CGPA") rather than any specific university's name or
-function parseEducationCertificate(documentType, text) {
-  const isMarksheet = /\b(mark ?sheet|grade card|statement of marks|transcript)\b/i.test(text);
+// board, so it works for SPPU, any other university, or any school board
+// alike. Covers both degree certificates (Certification|Degree) and
+// marksheets (Education|10th Marksheet, Education|12th Marksheet,
+// Education|Semester Marksheet) —
+// `classification` (from classifyDocument/classifyFromHint) decides which
+// output shape to fill so the keys line up with that document type's fields
+// in config/fieldLabels.js.
+function parseEducationCertificate(classification, text) {
+  const { category, subCategory, documentType } = classification;
   const name = extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
     || extract(/\bname\s*[: ][^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text);
-  const universityLine = extract(/^.*\b(?:university|vidyapeeth|institute of technology|board of [a-z ]+ education)\b.*$/im, text);
+  const instituteLine = extract(/^.*\b(?:university|vidyapeeth|institute of technology|board of [a-z ]+ education|school|college)\b.*$/im, text);
+  const instituteClean = instituteLine ? instituteLine.replace(/\s{2,}/g, ' ').trim() : '';
   const degreeName = extract(/\b((?:bachelor|master) of [A-Za-z .&()]+|diploma in [A-Za-z .&()]+|b\.?\s?e\.?|b\.?\s?tech\.?|m\.?\s?e\.?|m\.?\s?tech\.?|b\.?\s?sc\.?|m\.?\s?sc\.?|b\.?\s?com\.?|m\.?\s?com\.?|ph\.?\s?d\.?)\b/i, text);
   const branch = extract(/\(([A-Za-z &,.]{3,60})\)/, text)
-    || extract(/(?:branch|specialization|stream)\s*(?:of|in)?\s*[: ]\s*([A-Za-z &]+)/i, text);
+    || extract(/(?:branch|specialization|stream|course)\s*(?:of|in)?\s*[: ]\s*([A-Za-z &]+)/i, text);
   const seatNumber = extract(/(?:seat\s*no\.?|exam\s*seat\s*no\.?|roll\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
   const enrollmentNumber = extract(/(?:enrol{1,2}ment\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text) || extract(/\bprn\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
   const certificateNumber = extract(/certificate\s*no\.?\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
@@ -254,12 +337,52 @@ function parseEducationCertificate(documentType, text) {
   const percentage = extract(/\b(\d{1,3}(?:\.\d+)?)\s*%/, text);
   const dateOfIssue = normalizeDate(extract(/(?:dated|date of issue|convocation date|issued on)\s*[: ]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text));
   const yearOfPassing = extract(/\b(?:19|20)\d{2}\b/, text);
+  const semester = extract(/\bsem(?:ester)?\s*[: ]?\s*([IVXLCivxlc\d]{1,4})\b/i, text);
+  const result = extract(/\b(pass(?:ed)?|fail(?:ed)?|reappear|distinction)\b/i, text);
   const classCgpaPercentage = classOrGrade || (cgpa ? `CGPA ${cgpa}` : '') || (percentage ? `${percentage}%` : '');
+  const totalMarksPercentage = percentage ? `${percentage}%` : classOrGrade || '';
+  const legacy = {
+    name: name || '',
+    issuingAuthority: instituteClean,
+    documentNumber: certificateNumber || enrollmentNumber || seatNumber || '',
+    date: dateOfIssue || '',
+    category,
+    subCategory,
+    documentType,
+  };
+  if (subCategory === 'Education') {
+    if (documentType === 'Semester Marksheet') {
+      return {
+        studentFullName: name || '',
+        universityInstituteName: instituteClean,
+        courseBranch: branch ? branch.trim() : '',
+        semester: semester || '',
+        seatNumberRollNumber: seatNumber || '',
+        prnEnrollmentNumber: enrollmentNumber || '',
+        sgpaCgpa: cgpa || '',
+        result: result || '',
+        dateOfIssue: dateOfIssue || '',
+        ...legacy,
+      };
+    }
+    // 10th/12th Marksheet and any other Education document type share this
+    // school-level shape; unmapped labels are simply left unset.
+    return {
+      studentFullName: name || '',
+      schoolBoardName: instituteClean,
+      classStandard: branch ? branch.trim() : '',
+      seatNumberRollNumber: seatNumber || '',
+      totalMarksPercentage,
+      grade: classOrGrade || '',
+      dateOfIssue: dateOfIssue || '',
+      yearOfPassing: yearOfPassing || '',
+      ...legacy,
+    };
+  }
+  // Certification|Degree (and any other Certification document type).
   return {
-    // Keys computed with keyFromLabel() from the exact labels registered for
-    // 'Certification|Degree' in config/fieldLabels.js (kept in sync with
     studentFullName: name || '',
-    universityInstituteName: universityLine ? universityLine.replace(/\s{2,}/g, ' ').trim() : '',
+    universityInstituteName: instituteClean,
     degreeName: degreeName ? degreeName.trim() : '',
     branchSpecialization: branch ? branch.trim() : '',
     seatNumberRollNumber: seatNumber || '',
@@ -268,15 +391,122 @@ function parseEducationCertificate(documentType, text) {
     certificateNumber: certificateNumber || '',
     dateOfIssue: dateOfIssue || '',
     yearOfPassing: yearOfPassing || '',
-    // Legacy/common fields kept for backward compatibility with anything
-    // still reading the older generic shape.
-    name: name || '',
-    issuingAuthority: universityLine ? universityLine.replace(/\s{2,}/g, ' ').trim() : '',
-    documentNumber: certificateNumber || enrollmentNumber || seatNumber || '',
+    ...legacy,
+  };
+}
+// Generic bill parser shared by Electricity/Water/Gas/Broadband/Mobile bills
+// (Utilities & Bills|*) — same layout family (consumer/account name, a bill
+// or account number, a billing period, an amount, and a due date), so one
+// parser with slightly different label preferences covers all of them.
+function parseUtilityBill(text, classification) {
+  const { category, subCategory, documentType } = classification;
+  const consumerName = extract(/(?:consumer|customer|account holder)\s*name\s*[: ]\s*([A-Za-z .'-]{3,60})/i, text)
+    || extract(/\bname\s*[: ]\s*([A-Za-z .'-]{3,60})/i, text);
+  const consumerNumber = extract(/(?:consumer|account)\s*(?:no\.?|number|id)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const billNumber = extract(/(?:bill|invoice)\s*(?:no\.?|number)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const billingPeriod = extract(/(?:billing period|bill period|billing month)\s*[: ]\s*([A-Za-z0-9 ,.\-\/]{3,30})/i, text);
+  const unitsConsumed = extract(/(?:units? consumed|total units)\s*[: ]\s*([\d.,]+)/i, text);
+  const meterNumber = extract(/meter\s*(?:no\.?|number)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const planName = extract(/(?:plan|package)\s*(?:name)?\s*[: ]\s*([A-Za-z0-9 .+-]{3,40})/i, text);
+  const billAmount = extract(/(?:bill amount|amount payable|total amount due|net payable|total due)\s*[: ]*₹?\s*([\d,]+(?:\.\d+)?)/i, text)
+    || extract(/₹\s*([\d,]+(?:\.\d+)?)/, text);
+  const dueDateRaw = extract(/due date\s*[: ]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text);
+  const dueDate = normalizeDate(dueDateRaw) || dueDateRaw;
+  const providerName = extract(/^.*\b(?:electricity board|power|energy|water (?:board|supply)|gas (?:agency|company)|broadband|telecom|communications?)\b.*$/im, text);
+  return {
+    consumerName: consumerName || '',
+    customerName: consumerName || '',
+    consumerNumber: consumerNumber || '',
+    accountNumber: consumerNumber || '',
+    mobileNumber: consumerNumber || '',
+    billNumber: billNumber || '',
+    billingPeriod: billingPeriod ? billingPeriod.trim() : '',
+    unitsConsumed: unitsConsumed || '',
+    meterNumber: meterNumber || '',
+    planName: planName ? planName.trim() : '',
+    billAmount: billAmount || '',
+    dueDate: dueDate || '',
+    providerName: providerName ? providerName.replace(/\s{2,}/g, ' ').trim() : '',
+    // Legacy/common fields.
+    name: consumerName || '',
+    issuingAuthority: providerName ? providerName.replace(/\s{2,}/g, ' ').trim() : '',
+    documentNumber: billNumber || consumerNumber || '',
+    date: dueDate || '',
+    amount: billAmount || '',
+    category,
+    subCategory,
+    documentType,
+  };
+}
+function parseRationCard(text) {
+  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const headOfFamilyName = extract(/(?:head of (?:the )?family|name of head)\s*[: ]\s*([A-Za-z .'-]{3,60})/i, text)
+    || extract(/\bname\s*[: ]\s*([A-Za-z .'-]{3,60})/i, text);
+  const rationCardNumber = extract(/ration\s*card\s*(?:no\.?|number)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const cardType = extract(/\b(APL|BPL|AAY|Antyodaya)\b/i, text).toUpperCase();
+  const addressMatch = text.match(/((?:[A-Za-z0-9,./\- ]+\n){0,6}[A-Za-z ]+[-,\s]\d{6})/);
+  const address = addressMatch ? addressMatch[1].replace(/\n+/g, ', ').replace(/\s{2,}/g, ' ').trim() : '';
+  const dateOfIssue = normalizeDate(extract(/(?:date of issue|issued on)\s*[: ]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text));
+  return {
+    headOfFamilyName: headOfFamilyName || '',
+    rationCardNumber: rationCardNumber || '',
+    familyMembers: '',
+    address,
+    cardType: cardType || '',
+    issuingAuthority: 'Public Distribution System',
+    dateOfIssue: dateOfIssue || '',
+    // Legacy/common fields.
+    name: headOfFamilyName || '',
+    documentNumber: rationCardNumber || '',
     date: dateOfIssue || '',
-    category: 'Professional',
-    subCategory: 'Certification',
-    documentType: isMarksheet ? 'Degree' : documentType,
+  };
+}
+// Shared parser for Domicile/Caste/Income/Non-Creamy Layer certificates
+// (Government Certificates|*) — all issued by the same revenue-office
+// boilerplate ("... S/o ... is a resident of ... belongs to ... caste ...
+// has an annual income of Rs. ..."), so one parser covers all four; unused
+// fields for a given documentType are simply left blank by the caller's UI.
+function parseGovCertificate(text, classification) {
+  const { category: docCategory, subCategory, documentType } = classification;
+  const applicantName = extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
+    || extract(/\bname\s*(?:of applicant)?\s*[: ]\s*([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,4})/i, text);
+  const fatherName = extract(/\b(?:s\/o|d\/o|w\/o|son of|daughter of|wife of)\s*[: ]?\s*([A-Z][A-Za-z.'-]+(?:\s+[A-Za-z.'-]+){0,3})/i, text)
+    || extract(/father'?s?\s*name\s*[: ]\s*([A-Z][A-Za-z.'-]+(?:\s+[A-Za-z.'-]+){0,3})/i, text);
+  const caste = extract(/\bcaste\s*[: ]\s*([A-Za-z ]{3,30})/i, text);
+  const casteCategory = extract(/\bcategory\s*[: ]\s*([A-Za-z\/ ]{2,20})/i, text) || extract(/\b(SC|ST|OBC|VJNT|NT|EWS|OPEN)\b/, text);
+  const annualIncome = extract(/annual income\s*[: ]*(?:rs\.?|₹)?\s*([\d,]+)/i, text) || extract(/income of\s*(?:rs\.?|₹)?\s*([\d,]+)/i, text);
+  const financialYear = extract(/financial year\s*[: ]\s*([\d\-/]{4,10})/i, text);
+  const addressMatch = text.match(/((?:[A-Za-z0-9,./\- ]+\n){0,6}[A-Za-z ]+[-,\s]\d{6})/);
+  const address = addressMatch ? addressMatch[1].replace(/\n+/g, ', ').replace(/\s{2,}/g, ' ').trim() : '';
+  const stateDistrict = extract(/\bdistrict\s*[: ]\s*([A-Za-z ]{2,30})/i, text);
+  const certificateNumber = extract(/certificate\s*no\.?\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  const issuingAuthorityLine = extract(/^.*\b(?:tehsildar|sub[- ]?divisional (?:magistrate|officer)|sdm|collector|revenue department|district magistrate|mandal|taluka)\b.*$/im, text);
+  const dateOfIssue = normalizeDate(extract(/(?:date of issue|issued on|dated)\s*[: ]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text));
+  const validity = extract(/valid\s*(?:up)?\s*to\s*[: ]?\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text);
+  const issuingAuthority = issuingAuthorityLine ? issuingAuthorityLine.replace(/\s{2,}/g, ' ').trim() : '';
+  return {
+    applicantName: applicantName || '',
+    fatherSHusbandSName: fatherName || '',
+    fatherSName: fatherName || '',
+    caste: caste || '',
+    casteCategory: casteCategory || '',
+    annualIncome: annualIncome || '',
+    financialYear: financialYear || '',
+    address,
+    stateDistrict: stateDistrict || '',
+    certificateNumber: certificateNumber || '',
+    issuingAuthority,
+    dateOfIssue: dateOfIssue || '',
+    validity: validity || '',
+    purpose: '',
+    certificateTitle: documentType,
+    // Legacy/common fields.
+    name: applicantName || '',
+    documentNumber: certificateNumber || '',
+    date: dateOfIssue || '',
+    category: docCategory,
+    subCategory,
+    documentType,
   };
 }
 const AADHAAR_NUMBER_RE = /\b(\d{4}\s?\d{4}\s?\d{4})\b/;
@@ -369,6 +599,7 @@ function parseIdentityDocument(documentType, text) {
   const dt = String(documentType || '').toLowerCase();
   if (dt.includes('aadhaar')) return parseAadhaar(text);
   if (dt.includes('pan card') || dt === 'pan') return parsePan(text);
+  if (dt.includes('ration')) return parseRationCard(text);
   return {};
 }
 function parseGenericLabelValues(text) {
@@ -590,8 +821,12 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
     // 2. Run the extractor suited to that classification.
     const ASSET_SUBCATEGORIES = new Set(['Vehicle', 'Jewellery', 'Property', 'Insurance', 'Gadgets/Appliances', 'Gadgets & Appliances']);
     let specific;
-    if (classification.subCategory === 'Certification') {
-      specific = parseEducationCertificate(classification.documentType, cleanedText);
+    if (classification.subCategory === 'Certification' || classification.subCategory === 'Education') {
+      specific = parseEducationCertificate(classification, cleanedText);
+    } else if (classification.subCategory === 'Utilities & Bills') {
+      specific = parseUtilityBill(cleanedText, classification);
+    } else if (classification.subCategory === 'Government Certificates') {
+      specific = parseGovCertificate(cleanedText, classification);
     } else if (ASSET_SUBCATEGORIES.has(classification.subCategory)) {
       specific = parseInvoice(cleanedText, classification);
     } else if (classification.subCategory === 'Identity & Legal') {
