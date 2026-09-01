@@ -135,6 +135,16 @@ const EDUCATION_SIGNALS = [
   /\bseat no\.?\b/i,
   /\bprn\b/i,
   /\benrol(l)?ment no\.?\b/i,
+  // Real-world statement-of-marks headers ("STATEMENT SHOWING THE MARKS...",
+  // "STATEMENT SHOWING THE NUMBER OF MARKS OBTAINED BY...") and SSC/HSC
+  // certificate wording that spells out "Secondary School Certificate" /
+  // "Higher Secondary Certificate" in full instead of the SSC/HSC acronym.
+  /\bstatement showing(?: the)?(?: number of)? marks\b/i,
+  /\bmarks obtained by\b/i,
+  /\bsecondary school certificate\b/i,
+  /\bhigher secondary certificate\b/i,
+  /\bdivisional board\b/i,
+  /\bin each head of passing\b/i,
 ];
 // Marksheets (school-level or semester) overlap heavily with degree-certificate
 // wording, so they share the same EDUCATION_SIGNALS scoring pass; this narrower
@@ -151,6 +161,28 @@ const MARKSHEET_SIGNALS = [
   /\bhsc\b/i,
   /\bboard of secondary education\b/i,
   /\bboard of (?:higher )?secondary education\b/i,
+  // Board wording is frequently "Board of Secondary AND Higher Secondary
+  // Education" (one combined board) rather than either phrase above alone.
+  /\bboard of secondary and higher secondary education\b/i,
+  /\bstatement showing(?: the)?(?: number of)? marks\b/i,
+  /\bmarks obtained by\b/i,
+  /\bsecondary school certificate\b/i,
+  /\bhigher secondary certificate\b/i,
+  /\bdivisional board\b/i,
+  /\bin each head of passing\b/i,
+];
+// Phrases that only really show up on an actual marks statement/marksheet,
+// never on a degree-conferral certificate — even though a marksheet's
+// header commonly *names* the degree it's for (e.g. "STATEMENT OF MARKS FOR
+// MASTER OF ENGINEERING"), which would otherwise wrongly trip the "bachelor
+// of / master of" degree-wording check below. A hit here overrides that.
+const STRONG_MARKSHEET_SIGNALS = [
+  /\bstatement (?:of|showing)(?: the)?(?: number of)? marks\b/i,
+  /\bmark ?sheet\b/i,
+  /\bgrade card\b/i,
+  /\btranscript\b/i,
+  /\bmarks obtained by\b/i,
+  /\bin each head of passing\b/i,
 ];
 const TENTH_SIGNALS = [/\b10th\b/i, /\bssc\b/i, /\bsecondary school certificate\b/i, /\bx\s*std\b/i, /\bclass\s*x\b/i];
 const TWELFTH_SIGNALS = [/\b12th\b/i, /\bhsc\b/i, /\bhigher secondary certificate\b/i, /\bxii\s*std\b/i, /\bclass\s*xii\b/i, /\bintermediate\b/i];
@@ -228,8 +260,9 @@ function classifyDocument(text) {
   // Only once education has already won do we split marksheet vs degree,
   // and school-level (SSC/HSC) vs semester-level, using the narrower signals.
   if (result.subCategory === 'Certification' && result.documentType === 'Degree') {
-    const looksLikeDegree = /\b(degree of|bachelor of|master of|convocation|has been awarded)\b/i.test(text);
-    const looksLikeMarksheet = scoreSignals(text, MARKSHEET_SIGNALS) >= 2;
+    const looksLikeMarksheetStrong = STRONG_MARKSHEET_SIGNALS.some((p) => p.test(text));
+    const looksLikeDegree = !looksLikeMarksheetStrong && /\b(degree of|bachelor of|master of|convocation|has been awarded)\b/i.test(text);
+    const looksLikeMarksheet = looksLikeMarksheetStrong || scoreSignals(text, MARKSHEET_SIGNALS) >= 2;
     if (looksLikeMarksheet && !looksLikeDegree) {
       let eduDocType = 'Semester Marksheet';
       if (scoreSignals(text, TWELFTH_SIGNALS) > 0) eduDocType = '12th Marksheet';
@@ -328,27 +361,63 @@ function parseEducationCertificate(classification, text) {
   // B190412345" where "1 1." is OCR noise standing in for the missing
   // colon). These patterns tolerate that noise instead of requiring the
   // label to sit immediately next to a clean separator.
+  // Older SSC/HSC certificates print "This is to certify that the
+  // withinsigned" followed by the candidate's name on the *next* line
+  // (originally a blank box on the printed form), so that variant is tried
+  // before the generic same-line "certify that ..." pattern — otherwise the
+  // generic pattern greedily (and wrongly) captures "the withinsigned"
+  // itself as the name.
   const name = extract(/name\s+of\s+(?:candidate|student)[^A-Za-z\r\n]{0,8}([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
-    || extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
+    || extract(/the\s+withinsigned\s*\n\s*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
+    || extract(/candidate'?s?\s+full\s+name[^\r\n]*\n\s*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
+    // University marksheets often skip any "Name:"-style label entirely and
+    // just print "Smt./Shri/Kumari <NAME> College: ..." on one line.
+    || extract(/\b(?:mr|ms|mrs|shri|smt|kumari|km)\.?[^\S\r\n]+([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})(?=[^\S\r\n]+college\b)/i, text)
+    || extract(/(?:this is to certify that|certify that)[^\S\r\n]*(?:mr\.?|ms\.?|mrs\.?|shri\.?|smt\.?|kumari|km\.?)?[^\S\r\n]*(?!the\s+withinsigned)([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text)
     || extract(/\bname\s*[: ][^\S\r\n]*([A-Z][A-Za-z.'-]+(?:[^\S\r\n]+[A-Z][A-Za-z.'-]+){1,4})/i, text);
   const instituteLine = extract(/^.*\b(?:university|vidyapeeth|institute of technology|board of [a-z ]+ education|school|college)\b.*$/im, text);
   const instituteClean = instituteLine ? instituteLine.replace(/\s{2,}/g, ' ').trim() : '';
   const degreeName = extract(/\b((?:bachelor|master) of [A-Za-z .&()]+|diploma in [A-Za-z .&()]+|b\.?\s?e\.?|b\.?\s?tech\.?|m\.?\s?e\.?|m\.?\s?tech\.?|b\.?\s?sc\.?|m\.?\s?sc\.?|b\.?\s?com\.?|m\.?\s?com\.?|ph\.?\s?d\.?)\b/i, text);
-  const branch = extract(/\(([A-Za-z &,.]{3,60})\)/, text)
-    || extract(/(?:branch|specialization|stream|course)\s*(?:of|in)?\s*[: ]\s*([A-Za-z &]+)/i, text);
+  // A labelled "Branch: ..." / "Course: ..." beats a bare-parenthetical
+  // scan — statements-of-marks often have an unrelated parenthetical in the
+  // title first (e.g. "MASTER OF ENGINEERING (by papers)"), well before the
+  // real "BRANCH: G01 ELECTRONICS (COMPUTER)" line further down.
+  const branch = extract(/(?:branch|specialization|stream|course)\s*(?:of|in)?\s*[: ]\s*(?:[A-Z0-9]{2,5}\s+)?([A-Za-z][A-Za-z .&]+(?:\([A-Za-z .&]+\))?)/i, text)
+    || extract(/\(([A-Za-z &,.]{3,60})\)/, text);
   const seatNumber = extract(/(?:seat\s*no\.?|exam\s*seat\s*no\.?)(?:[^A-Za-z0-9\r\n]{0,5}\d{1,2}){0,3}[^A-Za-z0-9\r\n]{0,5}\b([A-Z]{0,3}\d{6,12})\b/i, text)
     || extract(/(?:seat\s*no\.?|exam\s*seat\s*no\.?|roll\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
-  const enrollmentNumber = extract(/(?:enrol{1,2}ment\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text)
-    || extract(/\bprn\s*(?:no\.?)?[^0-9\r\n]{0,10}(\d{9,14})\b/i, text)
-    || extract(/\bprn\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
+  // Some statements print "PRN: -----" / "PRN: --" as a literal placeholder
+  // for a blank field rather than an actual number — treat a dash-only
+  // capture as "not present" so it doesn't get displayed as the PRN.
+  const stripPlaceholder = (v) => (v && /^-+$/.test(v) ? '' : v);
+  const enrollmentNumber = stripPlaceholder(
+    extract(/(?:enrol{1,2}ment\s*no\.?)\s*[: ]\s*([A-Za-z0-9/-]+)/i, text)
+      || extract(/\bprn\s*(?:no\.?)?[^0-9\r\n]{0,10}(\d{9,14})\b/i, text)
+      || extract(/\bprn\s*[: ]\s*([A-Za-z0-9/-]+)/i, text)
+  );
   const certificateNumber = extract(/certificate\s*no\.?\s*[: ]\s*([A-Za-z0-9/-]+)/i, text);
-  const classOrGrade = extract(/\b(first class with distinction|first class|higher second class|second class|pass class|distinction|honou?rs)\b/i, text);
+  const classOrGrade = extract(/\b(first class with dist(?:inction|n)\.?|first class|higher second class|second class|pass class|distinction|honou?rs)\b/i, text);
   const cgpa = extract(/\b[cs]gpa\s*[: ]\s*([\d.]{1,5})/i, text);
   const percentage = extract(/\b(\d{1,3}(?:\.\d+)?)\s*%/, text);
-  const dateOfIssue = normalizeDate(extract(/(?:dated|date of issue|convocation date|issued on)\s*[: ]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text));
-  const yearOfPassing = extract(/\b(?:19|20)\d{2}\b/, text);
+  const dateOfIssue = normalizeDate(extract(/(?:dated|date of issue|convocation date|issued on|date)(?!\s*of\s*birth)\s*[: ]\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i, text));
+  // Prefer a year that's explicitly tied to the exam/result (a labelled
+  // "Year:", or the year following "... examination held in <month>,
+  // <year>") over a bare scan for the first 4-digit number in the text —
+  // that scan tends to latch onto an unrelated reference/serial number
+  // (e.g. a duplicate-copy receipt no. like "2009" printed above the actual
+  // 1995 exam year) or a curriculum revision year in the document title
+  // (e.g. "(Revised 2002)" on a statement for a 2005 exam).
+  const yearOfPassing = extract(/(?:year\s*of\s*passing|passing\s*year)\s*[: ]\s*((?:19|20)\d{2})/i, text)
+    || extract(/\bheld in\b[^\r\n]{0,20}?((?:19|20)\d{2})/i, text)
+    || extract(/\byear\s*[: ]\s*[a-z]*\s*((?:19|20)\d{2})/i, text)
+    || extract(/\b(?:19|20)\d{2}\b/, text);
   const semester = extract(/\bsem(?:ester)?\s*[: ]?\s*([IVXLCivxlc\d]{1,4})\b/i, text);
-  const result = extract(/\b(pass(?:ed)?|fail(?:ed)?|reappear|distinction)\b/i, text);
+  // A labelled "Result : ..." line beats a bare pass/fail scan — marksheets
+  // commonly print a legend near the top explaining what each symbol means
+  // ("* Indicates Fail", "$ Indicates Previous Pass"), which the bare scan
+  // would otherwise match before ever reaching the real result further down.
+  const result = extract(/\bresult\s*[: ]\s*([A-Za-z .]+)/i, text)
+    || extract(/\b(pass(?:ed)?|fail(?:ed)?|reappear|distinction)\b/i, text);
   const classCgpaPercentage = classOrGrade || (cgpa ? `CGPA ${cgpa}` : '') || (percentage ? `${percentage}%` : '');
   const totalMarksPercentage = percentage ? `${percentage}%` : classOrGrade || '';
   const legacy = {
@@ -377,10 +446,18 @@ function parseEducationCertificate(classification, text) {
     }
     // 10th/12th Marksheet and any other Education document type share this
     // school-level shape; unmapped labels are simply left unset.
+    // classStandard is derived from the already-detected document type
+    // rather than reusing the "branch" parenthetical regex above — school
+    // certificates don't have a "(Branch)" style annotation, so that regex
+    // ends up grabbing an unrelated parenthetical elsewhere on the page
+    // (e.g. a spelled-out date of birth) instead of a standard/class.
+    const classStandard = documentType === '10th Marksheet' ? 'SSC / Std. X'
+      : documentType === '12th Marksheet' ? 'HSC / Std. XII'
+      : (branch ? branch.trim() : '');
     return {
       studentFullName: name || '',
       schoolBoardName: instituteClean,
-      classStandard: branch ? branch.trim() : '',
+      classStandard,
       seatNumberRollNumber: seatNumber || '',
       totalMarksPercentage,
       grade: classOrGrade || '',
