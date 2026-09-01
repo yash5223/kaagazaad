@@ -49,8 +49,6 @@ router.post(
       }
     }
     const documentTypeValue = assetData.subSubCategory || assetData.documentType || '';
-    const issueDateValue = assetData.issueDate;
-    const storeOrSellerValue = assetData.storeOrSeller || '';
     const editAssetId = assetData._id || assetData.id;
     const isEdit = Boolean(editAssetId);
     // The upload form builds its field list per document type (see
@@ -84,11 +82,21 @@ router.post(
       category: assetData.category,
       subCategory: assetData.subCategory,
       subSubCategory: documentTypeValue,
-      issueDate: issueDateValue ? new Date(issueDateValue) : null,
-      notesOrAddress: assetData.notesOrAddress || '',
-      storeOrSeller: storeOrSellerValue,
       ...dynamicFields,
     };
+    // issueDate/notesOrAddress/storeOrSeller aren't on the upload form for
+    // most document types either — only set them when the client actually
+    // sent a real value, instead of force-writing `issueDate: null` /
+    // `notesOrAddress: ''` / `storeOrSeller: ''` onto every single asset.
+    if (assetData.issueDate) {
+      assetFields.issueDate = new Date(assetData.issueDate);
+    }
+    if (assetData.notesOrAddress !== undefined && assetData.notesOrAddress !== null && String(assetData.notesOrAddress).trim() !== '') {
+      assetFields.notesOrAddress = assetData.notesOrAddress;
+    }
+    if (assetData.storeOrSeller !== undefined && assetData.storeOrSeller !== null && String(assetData.storeOrSeller).trim() !== '') {
+      assetFields.storeOrSeller = assetData.storeOrSeller;
+    }
     if (assetDocuments.length > 0) {
       assetFields.documents = assetDocuments;
     }

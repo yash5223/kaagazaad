@@ -16,8 +16,8 @@ const assetSchema = new mongoose.Schema(
     subCategory: { type: String, required: true },
     subSubCategory: { type: String, required: true },
     issueDate: { type: Date },
-    notesOrAddress: { type: String, default: '' },
-    storeOrSeller: { type: String, default: '' },
+    notesOrAddress: { type: String },
+    storeOrSeller: { type: String },
     // Deliberately NOT declaring documentNumber/issuingAuthority/expiryDate/
     // valueAmount/invoiceNumber (or any other dynamic field) as schema
     // paths here. A `default: ''` on a declared path gets applied by
