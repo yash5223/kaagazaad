@@ -521,6 +521,114 @@ function isPlausibleNameLine(line) {
   if (trimmed.length < 3) return false;
   return /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)*$/.test(trimmed);
 }
+// Known ID-number formats for documents that don't have a bespoke parser
+// (mirrors AADHAAR_NUMBER_RE / PAN_NUMBER_RE above) — reliable even when the
+// value isn't printed with an explicit label next to it.
+const PASSPORT_NUMBER_RE = /\b([A-PR-WYa-pr-wy][0-9]{7})\b/; // Indian passport: 1 letter (not Q/X/Z) + 7 digits
+const VOTER_ID_RE = /\b([A-Z]{3}[0-9]{7})\b/; // EPIC number
+// Turns a FIELD_LABELS-style label like "Father/Mother/Spouse Name" or
+// "EPIC / Voter ID Number" into shorter alias phrases, since real documents
+// print abbreviated or partial versions of the label ("F/H Name", "Voter ID
+// No", "S/o", "DL No") rather than the full spec wording.
+// Real documents abbreviate or rephrase FIELD_LABELS wording in ways that
+// aren't derivable by mechanically splitting the spec label (e.g. "Sex"
+// instead of "Gender", "DL No" instead of "Driving Licence Number", "Elector's
+// Name" instead of "Full Name"). Keyed by the normalized full spec label.
+// NOTE: keys here must already be normalized (lowercase, punctuation
+// collapsed to single spaces) to match how they're looked up below —
+// e.g. "Child's Full Name" normalizes to "child s full name", not
+// "child's full name".
+const LABEL_ALIAS_OVERRIDES = {
+  'full name': ["Elector's Name", 'Elector Name', "Holder's Name", 'Holder Name', 'Name'],
+  gender: ['Sex'],
+  'driving licence number': ['DL No', 'DL No.', 'DLN', 'Licence No', 'License No'],
+  'epic voter id number': ['Voter ID No', 'EPIC No', 'Card No', 'EPIC'],
+  'passport number': ['Passport No'],
+  'father mother spouse name': ['S/o', 'D/o', 'W/o', 'Guardian Name'],
+  'father s name': ['S/o', 'Guardian Name'],
+  'mother s name': ['D/o'],
+  'date of birth': ['DOB'],
+  'validity expiry date': ['Valid Till', 'Valid Upto', 'Expiry'],
+  'child s full name': ['Name of Child', 'Child Name'],
+  'issuing authority': ['Registrar', 'Issued By'],
+};
+function labelAliases(label) {
+  const base = String(label || '');
+  const aliases = new Set([base, base.replace(/'s\b/gi, '')]);
+  if (base.includes('/') && !/\d/.test(base)) {
+    const parts = base.split('/').map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1) {
+      const lastWords = parts[parts.length - 1].split(' ');
+      const suffix = lastWords.length > 1 ? ` ${lastWords.slice(1).join(' ')}` : '';
+      for (const p of parts) aliases.add(p.includes(' ') ? p : p + suffix);
+    }
+  }
+  const overrides = LABEL_ALIAS_OVERRIDES[normalizeLabelText(base)];
+  if (overrides) overrides.forEach((o) => aliases.add(o));
+  return Array.from(aliases).filter(Boolean);
+}
+function normalizeLabelText(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+// Multi-strategy label -> value extractor used for document types that don't
+// have a bespoke regex parser. Handles the three layouts real scans commonly
+// produce: (1) "Label: Value" / "Label - Value" on one line, (2) "Label" and
+// "Value" separated by 2+ spaces on one line (form-style), and (3) "Label"
+// alone on a line with the value on the next non-empty line (common when OCR
+// reads a boxed field top-to-bottom, the way Aadhaar names sit under a header).
+function extractFieldByLabel(lines, label) {
+  const variants = labelAliases(label).map(normalizeLabelText).filter(Boolean);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    // Colon is an unambiguous label/value separator; a bare hyphen is only
+    // treated as one when it has whitespace on both sides, so it doesn't
+    // false-match the hyphens inside dates or ID numbers (e.g. "05-06-2019").
+    const colonMatch = line.match(/^(.{2,45}?)\s*(?::\s*|\s-\s)(.{1,80})$/);
+    if (colonMatch) {
+      const lhs = normalizeLabelText(colonMatch[1]);
+      if (variants.some((v) => lhs === v || (v.length > 3 && lhs.startsWith(v)))) {
+        const val = colonMatch[2].trim();
+        if (val) return val;
+      }
+    }
+    const spacedMatch = line.match(/^(.{2,45}?)\s{2,}(.{1,80})$/);
+    if (spacedMatch) {
+      const lhs = normalizeLabelText(spacedMatch[1]);
+      if (variants.some((v) => lhs === v)) {
+        const val = spacedMatch[2].trim();
+        if (val) return val;
+      }
+    }
+    const norm = normalizeLabelText(line);
+    if (line.length < 40 && variants.some((v) => norm === v)) {
+      for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+        const next = lines[j];
+        if (!next) continue;
+        if (variants.some((v) => normalizeLabelText(next) === v)) continue;
+        return next;
+      }
+    }
+  }
+  return '';
+}
+// Applies every field defined for a subCategory|documentType in FIELD_LABELS
+// (config/fieldLabels.js) against the OCR text. This is the generic
+// extraction path used for any document type that doesn't have a bespoke
+// parser: Passport, Driving Licence, Voter ID, Birth/Marriage Certificate,
+// Name Change Affidavit, and every Financial/Healthcare/Travel/Employment/
+// Business/IP/Awards leaf type.
+function extractSpecFields(text, subCategory, documentType) {
+  const specs = getFieldSpecs(subCategory, documentType);
+  if (!specs) return {};
+  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const result = {};
+  for (const spec of specs) {
+    const value = extractFieldByLabel(lines, spec.label);
+    if (value) result[spec.key] = value;
+  }
+  return result;
+}
 function parseAadhaar(text) {
   const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const aadhaarNumber = extract(AADHAAR_NUMBER_RE, text).replace(/\s+/g, ' ');
@@ -600,7 +708,75 @@ function parseIdentityDocument(documentType, text) {
   if (dt.includes('aadhaar')) return parseAadhaar(text);
   if (dt.includes('pan card') || dt === 'pan') return parsePan(text);
   if (dt.includes('ration')) return parseRationCard(text);
-  return {};
+  // Every other Identity & Legal leaf type (Passport, Driving Licence, Voter
+  // ID, Birth Certificate, Marriage Certificate, Name Change Affidavit,
+  // Other) doesn't have a bespoke card-layout parser, so extract using the
+  // FIELD_LABELS spec for that type, topped up with a couple of
+  // high-confidence structured regexes for values that are often printed
+  // without an explicit label right next to them.
+  const generic = extractSpecFields(text, 'Identity & Legal', documentType);
+  // Normalize gender: a full word if we found one, or the M/F/T single-letter
+  // shorthand that "Sex" fields commonly use on passports and licences.
+  if (generic.gender) {
+    const g = generic.gender.trim().toUpperCase();
+    if (g === 'M') generic.gender = 'Male';
+    else if (g === 'F') generic.gender = 'Female';
+    else if (g === 'T') generic.gender = 'Transgender';
+  } else {
+    const genderRaw = extract(GENDER_RE, text) || extract(/\bsex\s*[:.]?\s*([MFT])\b/i, text);
+    if (genderRaw) {
+      const g = genderRaw.trim().toUpperCase();
+      generic.gender = g === 'M' ? 'Male' : g === 'F' ? 'Female' : g === 'T' ? 'Transgender'
+        : genderRaw[0].toUpperCase() + genderRaw.slice(1).toLowerCase();
+    }
+  }
+  if (dt.includes('passport')) {
+    if (!generic.passportNumber) generic.passportNumber = extract(PASSPORT_NUMBER_RE, text);
+    generic.documentNumber = generic.passportNumber || generic.documentNumber || '';
+    if (!generic.fullName) {
+      // Passports print Surname and Given Name(s) as two separate boxed
+      // fields rather than one "Full Name" field — assemble them if present.
+      const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+      const surname = extractFieldByLabel(lines, 'Surname');
+      const givenName = extractFieldByLabel(lines, 'Given Name(s)') || extractFieldByLabel(lines, 'Given Names')
+        || extractFieldByLabel(lines, 'Given Name');
+      const combined = [givenName, surname].filter(Boolean).join(' ').trim();
+      if (combined) generic.fullName = combined;
+    }
+  } else if (dt.includes('voter')) {
+    if (!generic.epicVoterIdNumber) generic.epicVoterIdNumber = extract(VOTER_ID_RE, text);
+    generic.documentNumber = generic.epicVoterIdNumber || generic.documentNumber || '';
+  }
+  if (!generic.documentNumber) {
+    generic.documentNumber = generic.registrationNumber || generic.certificateNumber
+      || generic.marriageRegistrationNumber || generic.affidavitNumber || '';
+  }
+  if (!generic.documentNumber) {
+    // Last resort for formats we don't have a fixed pattern for (e.g. Driving
+    // Licence numbers vary widely by state): the most number/letter-dense
+    // short token on the document tends to be its reference number.
+    generic.documentNumber = extract(/\b([A-Z]{2,4}[\s-]?\d{6,15})\b/, text);
+  }
+  const nameFallback = generic.fullName || generic.childSFullName || generic.husbandSFullName
+    || generic.wifeSFullName || generic.newName || '';
+  if (!generic.name) generic.name = nameFallback;
+  if (!generic.issuingAuthority) {
+    // These document types are issued by a single fixed national/statutory
+    // body (same reasoning as Aadhaar -> UIDAI and PAN -> Income Tax
+    // Department above), so default to it when the OCR text doesn't spell
+    // out an authority label explicitly.
+    if (dt.includes('passport')) generic.issuingAuthority = 'Ministry of External Affairs (Passport Seva)';
+    else if (dt.includes('voter')) generic.issuingAuthority = 'Election Commission of India';
+    else if (dt.includes('driving')) generic.issuingAuthority = extract(/\b([A-Za-z ]*RTO[A-Za-z ]*)\b/i, text) || 'Regional Transport Office (RTO)';
+    else if (dt.includes('birth')) generic.issuingAuthority = generic.notaryAuthorityName || 'Registrar of Births & Deaths';
+    else if (dt.includes('marriage')) generic.issuingAuthority = generic.notaryAuthorityName || 'Registrar of Marriages';
+    else generic.issuingAuthority = generic.notaryAuthorityName || '';
+  }
+  if (!generic.date) {
+    generic.date = generic.dateOfIssue || generic.dateOfRegistration || generic.registrationDate
+      || generic.dateOfMarriage || generic.dateOfBirth || '';
+  }
+  return generic;
 }
 function parseGenericLabelValues(text) {
   const result = {};
@@ -841,7 +1017,16 @@ router.post('/scan-receipt', authMiddleware, upload.single('image'), verifyRecei
       const regexFields = parseIdentityDocument(classification.documentType, cleanedText);
       specific = { ...classification, ...regexFields, ...templateFields };
     } else {
-      specific = { ...classification };
+      // Financial, Healthcare, Travel, Employment, Business, IP, and Awards
+      // & Recognition documents don't have bespoke parsers either — use the
+      // same FIELD_LABELS-driven extractor so these aren't left empty.
+      const specFields = extractSpecFields(cleanedText, classification.subCategory, classification.documentType);
+      if (!specFields.name) specFields.name = specFields.fullName || specFields.employeeName || specFields.patientName
+        || specFields.applicantName || specFields.accountHolderName || specFields.investorName
+        || specFields.passengerName || specFields.guestName || specFields.recipientName || '';
+      if (!specFields.documentNumber) specFields.documentNumber = specFields.referenceNumber || specFields.certificateNumber
+        || specFields.registrationNumber || specFields.policyNumber || specFields.accountNumber || '';
+      specific = { ...classification, ...specFields };
     }
     let parsed = { ...parseGenericLabelValues(cleanedText), ...specific };
     const meaningfulCount = Object.entries(parsed).filter(([k, v]) => (
