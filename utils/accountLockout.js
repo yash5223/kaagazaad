@@ -1,19 +1,24 @@
 const MAX_ATTEMPTS = 5;
-const BASE_LOCKOUT_MS = 60 * 1000;
-const MAX_LOCKOUT_MS = 30 * 60 * 1000;
+const BASE_LOCKOUT_MS = 60 * 1e3;
+const MAX_LOCKOUT_MS = 30 * 60 * 1e3;
 function computeLockoutMs(priorLockoutCount) {
   const ms = BASE_LOCKOUT_MS * Math.pow(2, Math.max(0, priorLockoutCount));
   return Math.min(ms, MAX_LOCKOUT_MS);
 }
-function checkLocked(user, { lockedUntilField }) {
+function checkLocked(user, {lockedUntilField: lockedUntilField}) {
   const lockedUntil = user[lockedUntilField];
-  if (lockedUntil && lockedUntil > new Date()) {
-    const retryAfterSeconds = Math.ceil((lockedUntil.getTime() - Date.now()) / 1000);
-    return { locked: true, retryAfterSeconds };
+  if (lockedUntil && lockedUntil > new Date) {
+    const retryAfterSeconds = Math.ceil((lockedUntil.getTime() - Date.now()) / 1e3);
+    return {
+      locked: true,
+      retryAfterSeconds: retryAfterSeconds
+    };
   }
-  return { locked: false };
+  return {
+    locked: false
+  };
 }
-function recordFailure(user, { attemptsField, lockedUntilField, lockoutCountField }) {
+function recordFailure(user, {attemptsField: attemptsField, lockedUntilField: lockedUntilField, lockoutCountField: lockoutCountField}) {
   user[attemptsField] = (user[attemptsField] || 0) + 1;
   if (user[attemptsField] >= MAX_ATTEMPTS) {
     const priorLockoutCount = user[lockoutCountField] || 0;
@@ -21,17 +26,23 @@ function recordFailure(user, { attemptsField, lockedUntilField, lockoutCountFiel
     user[lockedUntilField] = new Date(Date.now() + lockoutMs);
     user[lockoutCountField] = priorLockoutCount + 1;
     user[attemptsField] = 0;
-    return { justLocked: true, retryAfterSeconds: Math.ceil(lockoutMs / 1000) };
+    return {
+      justLocked: true,
+      retryAfterSeconds: Math.ceil(lockoutMs / 1e3)
+    };
   }
-  return { justLocked: false, remainingAttempts: MAX_ATTEMPTS - user[attemptsField] };
+  return {
+    justLocked: false,
+    remainingAttempts: MAX_ATTEMPTS - user[attemptsField]
+  };
 }
-function recordSuccess(user, { attemptsField, lockedUntilField }) {
+function recordSuccess(user, {attemptsField: attemptsField, lockedUntilField: lockedUntilField}) {
   user[attemptsField] = 0;
   user[lockedUntilField] = null;
 }
 module.exports = {
-  MAX_ATTEMPTS,
-  checkLocked,
-  recordFailure,
-  recordSuccess,
+  MAX_ATTEMPTS: MAX_ATTEMPTS,
+  checkLocked: checkLocked,
+  recordFailure: recordFailure,
+  recordSuccess: recordSuccess
 };

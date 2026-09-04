@@ -1,11 +1,16 @@
 FROM node:20-slim
 
-# tesseract-ocr is the system binary pytesseract shells out to.
-# python3/pip are needed to run scripts/ocr_engine.py.
+# System deps for the document-understanding pipeline (scripts/ocr_pipeline.py):
+# - tesseract-ocr: OCR engine pytesseract shells out to
+# - libreoffice: converts legacy .doc/.xls to .docx/.xlsx before parsing
+# - libgl1 / libglib2.0-0: runtime libs opencv-python-headless needs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     tesseract-ocr \
+    libreoffice \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,7 +19,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Install Python deps for the OCR subprocess.
+# Install Python deps for the OCR pipeline subprocess.
 COPY requirements.txt ./
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 

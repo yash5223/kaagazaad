@@ -1,14 +1,32 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 const otpSchema = new mongoose.Schema({
-  contactInfo: { type: String, required: true, lowercase: true, trim: true },
-  otpCode: { type: String, required: true },
-  expiresAt: { type: Date, required: true },
+  contactInfo: {
+    type: String,
+    required: true,
+    lowercase: true,
+    trim: true
+  },
+  otpCode: {
+    type: String,
+    required: true
+  },
+  expiresAt: {
+    type: Date,
+    required: true
+  },
   purpose: {
     type: String,
-    enum: ['password_reset', 'register', 'register_verified'],
-    default: 'password_reset'
+    enum: [ "password_reset", "register", "register_verified" ],
+    default: "password_reset"
   },
-  attempts: { type: Number, default: 0 }
+  attempts: {
+    type: Number,
+    default: 0
+  }
 });
-otpSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-module.exports = mongoose.model('Otp', otpSchema, 'password_resets');
+otpSchema.index({
+  expiresAt: 1
+}, {
+  expireAfterSeconds: 0
+});
+module.exports = mongoose.model("Otp", otpSchema, "password_resets");
