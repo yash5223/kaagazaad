@@ -2946,13 +2946,22 @@
     "Yogi, Ghose and Ganesan Group": 4
   },
   "Aadhaar Card::Date of Birth": {
-    "28/05/2000": 1
+    "28/05/2000": 2
   },
   "Aadhaar Card::Full Name": {
-    "Sid malhorta": 1
+    "Sid malhorta": 2
   },
   "Aadhaar Card::Gender": {
-    "Female": 1
+    "Female": 2
+  },
+  "Aadhaar Card::dateOfBirth": {
+    "2000-05-28": 3
+  },
+  "Aadhaar Card::fullName": {
+    "Sid malhorta": 3
+  },
+  "Aadhaar Card::gender": {
+    "Female": 3
   },
   "Affidavits::Court Name": {
     "Agra Metropolitan Magistrate Court": 1,

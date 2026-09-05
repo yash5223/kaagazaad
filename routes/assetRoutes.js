@@ -15,7 +15,14 @@ function serializeAsset(assetDoc) {
   const plain = assetDoc.toObject ? assetDoc.toObject() : {
     ...assetDoc
   };
-  plain.documents = (plain.documents || []).map(entry => resolveDocumentUrl(entry)).filter(Boolean);
+  const rawDocuments = plain.documents || [];
+  plain.documentsSizeBytes = rawDocuments.reduce((sum, entry) => {
+    if (entry && typeof entry === "object" && typeof entry.bytes === "number") {
+      return sum + entry.bytes;
+    }
+    return sum;
+  }, 0);
+  plain.documents = rawDocuments.map(entry => resolveDocumentUrl(entry)).filter(Boolean);
   return plain;
 }
 router.post("/save-asset", documentUpload.array("images", 10), fileTypeGuard(), validate(schemas.saveAssetBody), validateAssetDataField, asyncHandler(async (expressRequest, expressResponse) => {

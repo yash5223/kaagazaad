@@ -19,7 +19,8 @@ function uploadBufferToCloudinary(buffer, publicId, resourceType = "auto") {
       resolve({
         publicId: result.public_id,
         resourceType: result.resource_type,
-        format: result.format
+        format: result.format,
+        bytes: result.bytes || 0
       });
     });
     stream.end(buffer);

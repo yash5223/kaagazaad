@@ -120,6 +120,58 @@ def _run_ocr_models(stages, lang="eng", adaptive=True):
                 if result is not None:
                     results.append(result)
     return results
+def _boxes_overlap(a, b, min_iou=0.2):
+    """True if two word boxes plausibly refer to the same spot on the page.
+
+    All four preprocessing stages the OCR models run against share the same
+    resize/deskew step, so their pixel coordinate spaces line up and boxes
+    can be compared directly.
+    """
+    ax1, ay1, ax2, ay2 = a["left"], a["top"], a["left"] + a["width"], a["top"] + a["height"]
+    bx1, by1, bx2, by2 = b["left"], b["top"], b["left"] + b["width"], b["top"] + b["height"]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return False
+    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    # Use the smaller box's area so a small word fully covered by a larger
+    # (differently segmented) box still counts as the same spot.
+    return (inter / min(area_a, area_b)) >= min_iou
+def _fill_gaps_with_words(base_words, extra_words, source_label):
+    """Add words from `extra_words` that don't overlap anything in `base_words`.
+
+    Used both to combine disagreeing ensemble passes and to fold in the
+    Hindi-assist pass below — in both cases the rule is the same: never
+    replace a reading that's already there, only add words for spots that
+    were completely missed.
+    """
+    merged = list(base_words)
+    for w in extra_words:
+        if not any(_boxes_overlap(w, m) for m in merged):
+            merged.append({**w, "winning_model": source_label})
+    return merged
+def _merge_candidate_words(candidates, best_overall):
+    """Fill in gaps in the winning model's output using the other models.
+
+    When models disagree on word count it usually means they *segmented*
+    the page differently, not that one of them is simply wrong everywhere.
+    Discarding every non-winning model outright throws away any text a
+    weaker-scoring model happened to read correctly in a region the winner
+    missed entirely (faint watermarks, stylised headers, ID numbers on a
+    different background). Instead, keep all of the winning model's words
+    and only add words from other models that don't overlap anything
+    already kept, so we add missing content without introducing
+    conflicting re-reads of the same spot.
+    """
+    merged = list(best_overall["words"])
+    for cand in candidates:
+        if cand is best_overall:
+            continue
+        merged = _fill_gaps_with_words(merged, cand["words"], cand["model"])
+    return merged
 def _ensemble_words(candidates):
     if not candidates:
         return {"words": [], "raw_text": "", "avg_confidence": 0.0,
@@ -137,12 +189,14 @@ def _ensemble_words(candidates):
     word_counts = {len(c["words"]) for c in candidates}
     best_overall = max(candidates, key=lambda c: c["avg_confidence"])
     if len(word_counts) != 1 or not best_overall["words"]:
-        fallback_layout = analyze_layout(best_overall["words"])
-        raw_text = "\n".join(fallback_layout["lines"]) if fallback_layout["lines"] else best_overall["raw_text"]
+        merged_words = _merge_candidate_words(candidates, best_overall)
+        merged_layout = analyze_layout(merged_words)
+        raw_text = "\n".join(merged_layout["lines"]) if merged_layout["lines"] else best_overall["raw_text"]
+        avg_conf = mean([w["conf"] for w in merged_words]) if merged_words else best_overall["avg_confidence"]
         return {
-            "words": best_overall["words"], "raw_text": raw_text,
-            "avg_confidence": best_overall["avg_confidence"],
-            "ensemble_method": "best_model_fallback",
+            "words": merged_words, "raw_text": raw_text,
+            "avg_confidence": round(avg_conf, 2),
+            "ensemble_method": "best_model_merged",
             "models_compared": models_compared, "winning_model": best_overall["model"],
         }
     resolved_words = []
@@ -166,12 +220,47 @@ def _ensemble_words(candidates):
         "ensemble_method": "word_level_vote", "models_compared": models_compared,
         "winning_model": None,
     }
-def detect_and_recognize(stages, lang="eng", min_conf=0, adaptive=True):
+_HINDI_ASSIST_LANG = "hin+eng"
+def _run_hindi_assist_pass(stages):
+    """One extra OCR pass with Hindi loaded, used only to fill gaps.
+
+    Most Indian ID documents (Aadhaar, PAN, Voter ID, etc.) print every
+    field bilingually, and an English-only tessdata model often can't read
+    the Devanagari copy at all (it comes back empty or as a handful of
+    near-zero-confidence words), which loses text like "आधार" that the
+    classifier needs. The tempting fix is to just always OCR with
+    lang="eng+hin" — but that measurably hurts *digit* recognition on
+    plain-English documents (pincodes, PAN numbers, and dates all came out
+    wrong in testing once Hindi was loaded for every pass, because the
+    combined model reads some Latin digit glyphs as Devanagari ones).
+    So instead this runs as a fully separate pass whose words are only
+    ever added to fill a gap the English ensemble left completely empty —
+    never used to overwrite an existing (and likely more accurate for
+    Latin/numeric content) English reading of the same spot.
+    """
+    try:
+        return _run_tesseract(stages["gray_deskewed"], _HINDI_ASSIST_LANG, 6)
+    except Exception:
+        return None
+def detect_and_recognize(stages, lang="eng", min_conf=0, adaptive=True, hindi_assist=True):
     candidates = _run_ocr_models(stages, lang=lang, adaptive=adaptive)
     if not candidates:
         return {"words": [], "raw_text": "", "avg_confidence": 0.0,
                 "ensemble_method": None, "models_compared": []}
     result = _ensemble_words(candidates)
+    if hindi_assist:
+        hindi = _run_hindi_assist_pass(stages)
+        if hindi and hindi["words"]:
+            merged_words = _fill_gaps_with_words(result["words"], hindi["words"], "hindi_assist")
+            if len(merged_words) > len(result["words"]):
+                merged_layout = analyze_layout(merged_words)
+                avg_conf = mean([w["conf"] for w in merged_words])
+                result = {
+                    **result,
+                    "words": merged_words,
+                    "raw_text": "\n".join(merged_layout["lines"]) if merged_layout["lines"] else result["raw_text"],
+                    "avg_confidence": round(avg_conf, 2),
+                }
     if min_conf > 0:
         result["words"] = [w for w in result["words"] if w["conf"] >= min_conf]
     return result
@@ -189,9 +278,10 @@ def _print_ocr_model_summary(ocr_result, file=sys.stderr):
     elif method == "word_level_vote":
         print("  Result: word-by-word vote across all models "
               "(majority text, ties broken by confidence)", file=file)
-    elif method == "best_model_fallback":
-        print(f"  Result: models segmented the page differently, so the "
-              f"single most confident model won ({ocr_result.get('winning_model')})",
+    elif method == "best_model_merged":
+        print(f"  Result: models segmented the page differently, so the most "
+              f"confident model ({ocr_result.get('winning_model')}) was used as the "
+              f"base and unique text the other models caught was merged in",
               file=file)
 def analyze_layout(words):
     if not words:
@@ -351,12 +441,23 @@ TAXONOMY = {
     },
 }
 MANUAL_KEYWORDS = {
-    "Aadhaar Card": ["aadhaar", "aadhar", "uidai", "unique identification authority"],
-    "PAN Card": ["income tax department", "permanent account number", "pan card"],
-    "Passport": ["republic of india", "passport no", "given name", "place of birth"],
-    "Driving Licence": ["driving licence", "driving license", "transport department", "dl no"],
+    # Several of these documents are printed bilingually (English + Hindi), and
+    # a document photographed at an angle or with a stylised English header
+    # (colour gradients, script fonts) is often only cleanly OCR'd in the
+    # Hindi portion, or vice versa — so keying on English text alone misses a
+    # real chunk of otherwise-legible documents. The Hindi variants below are
+    # matched the same way as their English counterparts, against text now
+    # recognised via the "eng+hin" OCR language pass.
+    "Aadhaar Card": ["aadhaar", "aadhar", "uidai", "unique identification authority",
+                     "आधार", "भारत सरकार", "भारतीय विशिष्ट पहचान प्राधिकरण"],
+    "PAN Card": ["income tax department", "permanent account number", "pan card",
+                 "आयकर विभाग", "भारत सरकार"],
+    "Passport": ["republic of india", "passport no", "given name", "place of birth",
+                 "भारत गणराज्य", "पासपोर्ट"],
+    "Driving Licence": ["driving licence", "driving license", "transport department", "dl no",
+                        "परिवहन विभाग", "ड्राइविंग लाइसेंस"],
     "Voter ID": ["election commission of india", "voter id", "epic no",
-                 "elector's photo identity card"],
+                 "elector's photo identity card", "भारत निर्वाचन आयोग", "मतदाता"],
     "Birth Certificate": ["birth certificate", "registrar of births"],
     "Marriage Certificate": ["marriage certificate", "solemnized", "marriage registration"],
     "Name Change Affidavit": ["affidavit", "name change", "formerly known as"],
@@ -379,7 +480,13 @@ MANUAL_KEYWORDS = {
     "Gas Bill": ["gas bill", "lpg", "cylinder", "gas agency"],
     "Broadband/Internet Bill": ["broadband", "internet bill", "data usage", "isp"],
     "Mobile Bill": ["mobile bill", "recharge", "call details", "telecom"],
-    "Bank Account Documents": ["bank statement", "account number", "ifsc", "savings account"],
+    # "account number" on its own was too generic a keyword here: it's a
+    # substring of "permanent account number", so PAN cards (which the OCR
+    # sometimes fails to read the more specific "permanent account number"
+    # phrase from cleanly) were matching this instead of "PAN Card". The
+    # remaining keywords are all bank-statement-specific.
+    "Bank Account Documents": ["bank statement", "ifsc", "savings account",
+                               "bank account number", "account holder"],
     "Fixed Deposits (FDs)": ["fixed deposit", "fd receipt", "maturity date"],
     "Mutual Funds (MF)": ["mutual fund", "folio number", "nav", "sip"],
     "IT Returns": ["income tax return", "itr", "acknowledgement number", "assessment year"],
@@ -421,7 +528,9 @@ MANUAL_KEYWORDS = {
     "Service Agreements": ["service agreement", "scope of services"],
     "Purchase Agreements": ["purchase order", "purchase agreement"],
     "Audited Financial Statements": ["balance sheet", "profit and loss", "auditor's report"],
-    "Bank Documents": ["bank statement", "account number", "ifsc"],
+    # Same fix as "Bank Account Documents" above: "account number" alone
+    # false-matches "permanent account number" on PAN cards.
+    "Bank Documents": ["bank statement", "ifsc", "savings account"],
     "Trademark Documents": ["trademark", "trade mark registry", "tm application"],
     "Copyright Documents": ["copyright", "copyright office"],
     "Patent Documents": ["patent", "patent application", "claims"],
@@ -583,6 +692,43 @@ _KEYWORD_PATTERNS = {
 _OTHER_RESULT = {"domain": "Other", "category": "Other", "document_type": "Other",
                  "confidence": 0.0, "method": "keyword"}
 _LOW_CONFIDENCE_FLOOR = 0.15
+_FUZZY_KEYWORD_THRESHOLD = 0.78
+def _fuzzy_keyword_hit(text_lower, keyword, threshold=_FUZZY_KEYWORD_THRESHOLD):
+    """Tolerant fallback for when OCR mangles a keyword too badly for the
+    exact \\b...\\b regex to match — e.g. "permanent account number" read
+    as "perms t account number" off a PAN card with a hologram pattern
+    behind the text. Compares the keyword against each same-length-ish
+    window of consecutive words in the text rather than every character
+    offset, which keeps this cheap enough to run as a fallback.
+    """
+    kw_words = keyword.split()
+    text_words = text_lower.split()
+    span = len(kw_words)
+    for lo in (span - 1, span, span + 1):
+        if lo < 1:
+            continue
+        for i in range(0, max(0, len(text_words) - lo + 1)):
+            chunk = " ".join(text_words[i:i + lo])
+            if SequenceMatcher(None, chunk, keyword).ratio() >= threshold:
+                return True
+    return False
+def _fuzzy_keyword_classify(raw_text):
+    """Only tried when exact keyword matching found nothing at all, and
+    only against the curated MANUAL_KEYWORDS (not the much larger
+    auto-generated keyword list for every taxonomy leaf), so a noisy scan
+    still gets a shot at classifying without slowing down or introducing
+    false positives on the common, cleanly-OCR'd case.
+    """
+    text_lower = raw_text.lower()
+    for doc_type, keywords in MANUAL_KEYWORDS.items():
+        for kw in keywords:
+            if len(kw) < 6:
+                continue  # too short to fuzzy-match safely (false-positive risk)
+            if _fuzzy_keyword_hit(text_lower, kw):
+                domain, category = DOC_TYPE_TO_PATH[doc_type]
+                return {"domain": domain, "category": category, "document_type": doc_type,
+                        "confidence": 0.3, "method": "keyword_fuzzy"}
+    return None
 def _keyword_classify(raw_text):
     text_lower = raw_text.lower()
     best = None
@@ -593,11 +739,13 @@ def _keyword_classify(raw_text):
             best_score = score
             best = doc_type
     if best is None:
-        return dict(_OTHER_RESULT)
+        fuzzy = _fuzzy_keyword_classify(raw_text)
+        return fuzzy if fuzzy else dict(_OTHER_RESULT)
     domain, category = DOC_TYPE_TO_PATH[best]
     normalized = round(min(best_score / 4.0, 1.0), 2)
     if normalized < _LOW_CONFIDENCE_FLOOR:
-        return dict(_OTHER_RESULT)
+        fuzzy = _fuzzy_keyword_classify(raw_text)
+        return fuzzy if fuzzy else dict(_OTHER_RESULT)
     return {"domain": domain, "category": category, "document_type": best,
             "confidence": normalized, "method": "keyword"}
 DEFAULT_MODEL_PATH = "classifier_model.joblib"
