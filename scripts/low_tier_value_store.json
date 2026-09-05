@@ -2945,14 +2945,17 @@
     "Yogi Group Trading Co.": 2,
     "Yogi, Ghose and Ganesan Group": 4
   },
+  "Aadhaar Card::Aadhaar Number": {
+    "3425 0653 1151": 2
+  },
   "Aadhaar Card::Date of Birth": {
-    "28/05/2000": 2
+    "28/05/2000": 4
   },
   "Aadhaar Card::Full Name": {
     "Sid malhorta": 2
   },
   "Aadhaar Card::Gender": {
-    "Female": 2
+    "Female": 4
   },
   "Aadhaar Card::dateOfBirth": {
     "2000-05-28": 3
