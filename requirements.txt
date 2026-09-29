@@ -1,5 +1,5 @@
 pytesseract==0.3.13
-Pillow>=10.0.0
+Pillow>=12.3.0
 opencv-python-headless>=4.9.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
