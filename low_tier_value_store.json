@@ -1,0 +1,12 @@
+{
+  "Electricity Bill::Provider Name": {
+    "Ramesh Kumar": 1
+  },
+  "Health Insurance::Insurance Company": {
+    "HEALTH INSURANCE": 2
+  },
+  "Health Insurance::Policy Type": {
+    "Expiry Date": 1,
+    "HI-2026-998877": 1
+  }
+}
