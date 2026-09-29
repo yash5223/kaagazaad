@@ -9,7 +9,7 @@
     "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
-    "@sentry/node": "^10.71.0",
+    "@sentry/node": "^11.0.0",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
